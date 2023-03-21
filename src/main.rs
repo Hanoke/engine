@@ -109,8 +109,8 @@ fn get_debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoE
         p_next: ptr::null(),
         flags: vk::DebugUtilsMessengerCreateFlagsEXT::empty(),
         message_severity:   vk::DebugUtilsMessageSeverityFlagsEXT::WARNING | 
-                            vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE |
-                            vk::DebugUtilsMessageSeverityFlagsEXT::INFO |
+                            // vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE |
+                            // vk::DebugUtilsMessageSeverityFlagsEXT::INFO |
                             vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
         message_type:   vk::DebugUtilsMessageTypeFlagsEXT::GENERAL |
                         vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE |
@@ -242,6 +242,8 @@ fn get_swapchain_min_image_count(surface_loader: &extensions::khr::Surface, phys
      -> u32 {
     let capabilities = 
         unsafe{surface_loader.get_physical_device_surface_capabilities(*physical_device, *surface)}.unwrap();
+
+    println!("{capabilities:?}");
 
     // TODO: min_image_count + 1 is suggested because depending on minimum_image_count(2) might make application wait on driver
     // to let the driver finish its internal operation. ? I do not know why ?
@@ -418,7 +420,7 @@ impl Renderer {
                 image: *image,
                 view_type: vk::ImageViewType::TYPE_2D,
                 format: surface_format,
-                components: vk::ComponentMapping { // TODO: When you have a triangle, do monochromed images here.
+                components: vk::ComponentMapping {
                     r: vk::ComponentSwizzle::IDENTITY,
                     g: vk::ComponentSwizzle::IDENTITY,
                     b: vk::ComponentSwizzle::IDENTITY,
@@ -780,7 +782,7 @@ impl Renderer {
             current_frame_in_flight_idx: 0
         }
     }
-    fn render_frame (&mut self, window: &winit::window::Window, is_window_resized: bool) {
+    fn render_frame (&mut self, window: &winit::window::Window) {
         unsafe{self.device.wait_for_fences(&[self.queue_submit_finished_fences[self.current_frame_in_flight_idx]], true, u64::MAX)}.unwrap();
         unsafe{self.device.reset_fences(&[self.queue_submit_finished_fences[self.current_frame_in_flight_idx]])}.unwrap();
 
@@ -792,7 +794,11 @@ impl Renderer {
         //     println!("CURRENT FRAME AND SWAPCHAIN IMAGE IDX ARE NOT SAME: current_frame_idx: {} image_idx: {}", 
         //         self.current_frame_in_flight_idx, swapchain_image_idx);
         // }
-        if is_swapchain_suboptimal {panic!("Swapchain is suboptimal...")};
+        let window_inner_size = window.inner_size();
+        if is_swapchain_suboptimal {
+            println!("Swapchain is suboptimal returned from queue_present!");
+            self.recreate_swapchain(&window_inner_size);
+        }
 
         let command_buffer_begin_info = vk::CommandBufferBeginInfo {
             s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
@@ -803,7 +809,6 @@ impl Renderer {
         let clear_value = vk::ClearValue {
             color: vk::ClearColorValue{float32: [0.0f32, 0.0f32, 0.0f32, 1.0f32]},
         };
-        let window_inner_size = window.inner_size();
         let render_pass_begin_info = vk::RenderPassBeginInfo {
             s_type: vk::StructureType::RENDER_PASS_BEGIN_INFO,
             p_next: ptr::null(),
@@ -881,11 +886,14 @@ impl Renderer {
             p_results: ptr::null_mut()
         };
         let is_swapchain_suboptimal = unsafe{self.swapchain_loader.queue_present(self.graphics_queue, &present_info)}.unwrap();
-        if is_swapchain_suboptimal {panic!("Swapchain is suboptimal!");}
+        if is_swapchain_suboptimal {
+            println!("Swapchain is suboptimal returned from queue_present!");
+            self.recreate_swapchain(&window_inner_size);
+        }
 
         self.current_frame_in_flight_idx = (self.current_frame_in_flight_idx + 1) % (self.frames_in_flight_count as usize);
     }
-
+    
     fn recreate_swapchain(&mut self, window_new_inner_size: &winit::dpi::PhysicalSize<u32>) {
         for framebuffer in &self.framebuffers {
             unsafe{self.device.destroy_framebuffer(*framebuffer, None)};
@@ -932,7 +940,7 @@ impl Renderer {
                 image: *image,
                 view_type: vk::ImageViewType::TYPE_2D,
                 format: self.surface_format,
-                components: vk::ComponentMapping { // TODO: When you have a triangle, do monochromed images here.
+                components: vk::ComponentMapping {
                     r: vk::ComponentSwizzle::IDENTITY,
                     g: vk::ComponentSwizzle::IDENTITY,
                     b: vk::ComponentSwizzle::IDENTITY,
@@ -979,9 +987,14 @@ fn main() {
     let event_loop = winit::event_loop::EventLoop::new();
     let window = winit::window::WindowBuilder::new().build(&event_loop).expect("Could not create a window.");
     let mut renderer = Renderer::new(&window, 2);
+
+     // This bool is needed because WindowEvent::Resized is sent when program starts with incorrect height and width:
+     // https://github.com/rust-windowing/winit/issues/2094
+    let mut is_first_resized_event  = true;
     
     event_loop.run(move |event, _, control_flow| {
-        let mut is_window_resized = false;
+        // Need to check this because when window is minimized,  WindowEvent::Resized is fired with (height: 0, width: 0).
+        if !(window.inner_size().height > 0 && window.inner_size().width > 0) { return;}
         match event {
             Event::WindowEvent { window_id, event } if window_id == window.id() => match event {
                 WindowEvent::CloseRequested => {
@@ -997,11 +1010,13 @@ fn main() {
                         },
                 },
                 WindowEvent::Resized(new_inner_size) => {
-                    println!("Event::WindowEvent::Resized: {new_inner_size:?}");
-                    // TODO: Resize window when suboptimal and error out of date is received too.
-                    // TODO: refactor window resized code with new().
-                    // TODO: do version controlling.
-                    renderer.window_resized(&new_inner_size);
+                    if is_first_resized_event {
+                        is_first_resized_event = false;
+                        return;
+                    } else {
+                        println!("Event::WindowEvent::Resized: {new_inner_size:?}");
+                        renderer.window_resized(&new_inner_size);
+                    }
                 },
                 _ => {}
             },
@@ -1010,7 +1025,7 @@ fn main() {
             },
             Event::RedrawRequested(_window_id) => {
                 // println!("Event::RedrawRequested");
-                renderer.render_frame(&window, is_window_resized);
+                renderer.render_frame(&window);
             },
             _ => {
                 *control_flow = ControlFlow::Wait;
