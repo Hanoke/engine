@@ -238,12 +238,8 @@ fn get_present_mode(surface_loader: &extensions::khr::Surface, physical_device: 
     panic!("Wanted present mode: '{:?}' is not available!", wanted_present_mode);
 }
 
-fn get_swapchain_min_image_count(surface_loader: &extensions::khr::Surface, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR)
-     -> u32 {
-    // It is recommended to have +1 additional image for swapchain just in case GPU might make CPU wait on swapchain images
-    // while doing internal work.
-    let wanted_image_count: u32 = 2 + 1;
-
+fn get_swapchain_min_image_count(wanted_image_count: u32, surface_loader: &extensions::khr::Surface, 
+    physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR, ) -> u32 {
     let capabilities = 
         unsafe{surface_loader.get_physical_device_surface_capabilities(*physical_device, *surface)}.unwrap();
     if wanted_image_count >= capabilities.min_image_count && wanted_image_count <= capabilities.max_image_count {
@@ -291,12 +287,12 @@ struct Renderer {
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
     queue_submit_finished_fences: Vec<vk::Fence>,
-    frames_in_flight_count: usize,
+    frames_in_flight_count: u32,
     current_frame_in_flight_idx: usize
 }
 
 impl Renderer {
-    fn new (window: &winit::window::Window, frames_in_flight_count: usize) -> Renderer {
+    fn new (window: &winit::window::Window, frames_in_flight_count: u32) -> Renderer {
         let entry = unsafe {ash::Entry::load().unwrap()};
         // CREATE APP INFO:________________________________________________________________________________________________
         let app_name = CString::new("Hanokei App").unwrap();
@@ -347,10 +343,7 @@ impl Renderer {
             hinstance: window.hinstance() as vk::HINSTANCE,
             hwnd: window.hwnd() as vk::HWND,
         };
-        let win32_surface = unsafe {
-            win32_surface_loader.create_win32_surface(&win32_surface_create_info, None).
-                expect("Could not create a win32 surface.")
-        };
+        let win32_surface = unsafe{win32_surface_loader.create_win32_surface(&win32_surface_create_info, None)}.unwrap();
         // ________________________________________________________________________________________________________________
 
         // CREATE PHYSICAL DEVICE AND LOGICAL DEVICE. FIND GRAPHICS QUEUE IDX:_____________________________________________
@@ -362,40 +355,41 @@ impl Renderer {
         // ________________________________________________________________________________________________________________
 
         // CREATE SWAPCHAIN:_______________________________________________________________________________________________
-        let swapchain_loader = extensions::khr::Swapchain::new(&instance, &device);
-
         let (surface_format, surface_color_space) = 
-            get_surface_format_and_color_space(&surface_loader, &physical_device, &win32_surface);
+        get_surface_format_and_color_space(&surface_loader, &physical_device, &win32_surface);
         let surface_present_mode = get_present_mode(&surface_loader, &physical_device, &win32_surface);
-        let swapchain_min_image_count = get_swapchain_min_image_count(&surface_loader, &physical_device, &win32_surface);
-        let (surface_pre_transform, surface_composite_alpha) = 
+        // It is recommended to have +1 additional image for swapchain just in case GPU might make CPU wait on swapchain 
+        // images while doing internal work.
+        let swapchain_min_image_count = get_swapchain_min_image_count(frames_in_flight_count + 1, &surface_loader, 
+            &physical_device, &win32_surface);
+            let (surface_pre_transform, surface_composite_alpha) = 
             get_pre_transform_and_composite_alpha(&surface_loader, &physical_device, &win32_surface);
-        
-        let window_inner_size = window.inner_size();
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR {
-            s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
-            p_next: ptr::null(),
-            flags: vk::SwapchainCreateFlagsKHR::empty(),
-            surface: win32_surface,
-            min_image_count: swapchain_min_image_count,
-            image_format: surface_format,
-            image_color_space: surface_color_space,
-            image_extent: vk::Extent2D{height: window_inner_size.height, width: window_inner_size.width},
-            image_array_layers: 1, // Determines the amount of layers each image consists of.This is always 1 unless you
-            // are developing a stereoscopic 3D application.
-            image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT, // specifies what kind of operations we'll use the images
-            // in the swap chain for.It is also possible that you'll render images to a separate image first to perform 
-            // operations like post-processing. In that case you may use a value like VK_IMAGE_USAGE_TRANSFER_DST_BIT 
-            // instead and use a memory operation to transfer the rendered image to a swap chain image.
-            image_sharing_mode: vk::SharingMode::EXCLUSIVE,
-            queue_family_index_count: 0, // This thing is set if vk::SharingMode::CONCURRENT. For example: If you have a
-            //  different GRAPHICS and PRESENT family queues, this should be "2" with
-            //  image_sharing_mode: vk::SharingMode::CONCURRENT
-            p_queue_family_indices: ptr::null(), // This thing is set if vk::SharingMode::CONCURRENT
-            pre_transform: surface_pre_transform, // Describing the transform, relative to the presentation engine’s natural 
-            // orientation, applied to the image content prior to presentation. If it does not match the currentTransform
-            //  value returned by vkGetPhysicalDeviceSurfaceCapabilitiesKHR, the presentation engine will transform the 
-            // image content as part of the presentation operation.
+            
+            let window_inner_size = window.inner_size();
+            let swapchain_create_info = vk::SwapchainCreateInfoKHR {
+                s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
+                p_next: ptr::null(),
+                flags: vk::SwapchainCreateFlagsKHR::empty(),
+                surface: win32_surface,
+                min_image_count: swapchain_min_image_count,
+                image_format: surface_format,
+                image_color_space: surface_color_space,
+                image_extent: vk::Extent2D{height: window_inner_size.height, width: window_inner_size.width},
+                image_array_layers: 1, // Determines the amount of layers each image consists of.This is always 1 unless you
+                // are developing a stereoscopic 3D application.
+                image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT, // specifies what kind of operations we'll use the images
+                // in the swap chain for.It is also possible that you'll render images to a separate image first to perform 
+                // operations like post-processing. In that case you may use a value like VK_IMAGE_USAGE_TRANSFER_DST_BIT 
+                // instead and use a memory operation to transfer the rendered image to a swap chain image.
+                image_sharing_mode: vk::SharingMode::EXCLUSIVE,
+                queue_family_index_count: 0, // This thing is set if vk::SharingMode::CONCURRENT. For example: If you have a
+                //  different GRAPHICS and PRESENT family queues, this should be "2" with
+                //  image_sharing_mode: vk::SharingMode::CONCURRENT
+                p_queue_family_indices: ptr::null(), // This thing is set if vk::SharingMode::CONCURRENT
+                pre_transform: surface_pre_transform, // Describing the transform, relative to the presentation engine’s natural 
+                // orientation, applied to the image content prior to presentation. If it does not match the currentTransform
+                //  value returned by vkGetPhysicalDeviceSurfaceCapabilitiesKHR, the presentation engine will transform the 
+                // image content as part of the presentation operation.
             composite_alpha: surface_composite_alpha, // Indicating the alpha compositing mode to use when this surface is
             // composited together with other surfaces on certain window systems.
             present_mode: surface_present_mode,
@@ -403,9 +397,9 @@ impl Renderer {
             // that affect regions of the surface that are not visible.
             old_swapchain: vk::SwapchainKHR::null(),
         };
-        let swapchain = unsafe {
-            swapchain_loader.create_swapchain(&swapchain_create_info, None)
-        }.expect("Could not create swapchain.");
+
+        let swapchain_loader = extensions::khr::Swapchain::new(&instance, &device);
+        let swapchain = unsafe {swapchain_loader.create_swapchain(&swapchain_create_info, None)}.unwrap();
         // ________________________________________________________________________________________________________________
 
         // CREATE IMAGEVIEWS OF SWAPCHAIN IMAGES: _________________________________________________________________________
