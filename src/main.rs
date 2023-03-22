@@ -149,7 +149,7 @@ unsafe extern "system" fn debug_utils_callback (
 
 fn get_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
     let physical_devices = unsafe{instance.enumerate_physical_devices()}.unwrap();
-    println!("There are '{}' physical device(s).", physical_devices.len());
+    println!("There is '{}' physical device(s).", physical_devices.len());
     let physical_device = physical_devices[0]; // TODO: Just using the first one for now. Change it later.
     // list_physical_device_properties_and_features(&instance, &physical_device);
     physical_device
@@ -240,15 +240,13 @@ fn get_present_mode(surface_loader: &extensions::khr::Surface, physical_device: 
 
 fn get_swapchain_min_image_count(surface_loader: &extensions::khr::Surface, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR)
      -> u32 {
+    // It is recommended to have +1 additional image for swapchain just in case GPU might make CPU wait on swapchain images
+    // while doing internal work.
+    let wanted_image_count: u32 = 2 + 1;
+
     let capabilities = 
         unsafe{surface_loader.get_physical_device_surface_capabilities(*physical_device, *surface)}.unwrap();
-
-    println!("{capabilities:?}");
-
-    // TODO: min_image_count + 1 is suggested because depending on minimum_image_count(2) might make application wait on driver
-    // to let the driver finish its internal operation. ? I do not know why ?
-    let wanted_image_count: u32 = std::cmp::max(capabilities.min_image_count, 2) + 1;
-    if wanted_image_count > capabilities.min_image_count && wanted_image_count < capabilities.max_image_count {
+    if wanted_image_count >= capabilities.min_image_count && wanted_image_count <= capabilities.max_image_count {
         println!("swapchain image count is set to: '{}'", wanted_image_count);
         return wanted_image_count;
     }
@@ -266,6 +264,7 @@ fn get_pre_transform_and_composite_alpha(surface_loader: &extensions::khr::Surfa
 }
 
 
+#[allow(dead_code)]
 struct Renderer {
     entry: ash::Entry,
     instance: ash::Instance,
@@ -782,7 +781,7 @@ impl Renderer {
             current_frame_in_flight_idx: 0
         }
     }
-    fn render_frame (&mut self, window: &winit::window::Window) {
+    fn render_frame (&mut self, window_inner_size: &winit::dpi::PhysicalSize<u32>) {
         unsafe{self.device.wait_for_fences(&[self.queue_submit_finished_fences[self.current_frame_in_flight_idx]], true, u64::MAX)}.unwrap();
         unsafe{self.device.reset_fences(&[self.queue_submit_finished_fences[self.current_frame_in_flight_idx]])}.unwrap();
 
@@ -794,7 +793,6 @@ impl Renderer {
         //     println!("CURRENT FRAME AND SWAPCHAIN IMAGE IDX ARE NOT SAME: current_frame_idx: {} image_idx: {}", 
         //         self.current_frame_in_flight_idx, swapchain_image_idx);
         // }
-        let window_inner_size = window.inner_size();
         if is_swapchain_suboptimal {
             println!("Swapchain is suboptimal returned from queue_present!");
             self.recreate_swapchain(&window_inner_size);
@@ -1025,7 +1023,7 @@ fn main() {
             },
             Event::RedrawRequested(_window_id) => {
                 // println!("Event::RedrawRequested");
-                renderer.render_frame(&window);
+                renderer.render_frame(&window.inner_size());
             },
             _ => {
                 *control_flow = ControlFlow::Wait;
