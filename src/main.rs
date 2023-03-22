@@ -259,7 +259,12 @@ fn get_pre_transform_and_composite_alpha(surface_loader: &extensions::khr::Surfa
     (capabilities.current_transform, capabilities.supported_composite_alpha)
 }
 
+struct Vertex {
+    pos: [f32; 2],
+    color: [f32; 3]
+}
 
+// TODO: Do clean-up in Drop trait.
 #[allow(dead_code)]
 struct Renderer {
     entry: ash::Entry,
@@ -288,7 +293,10 @@ struct Renderer {
     render_finished_semaphores: Vec<vk::Semaphore>,
     queue_submit_finished_fences: Vec<vk::Fence>,
     frames_in_flight_count: u32,
-    current_frame_in_flight_idx: usize
+    current_frame_in_flight_idx: usize,
+
+    vertices: Vec<Vertex>,
+    vertex_buffer: vk::Buffer
 }
 
 impl Renderer {
@@ -512,7 +520,6 @@ impl Renderer {
         // "Keep a single subpass in each renderpass, use external dependencies only and optimize later when you're ready to measure the
         //  performance impact." Because when learning VK, adding multiple subpasses might increase complexity and they say desktop
         // is not actually benefit much from it unlike mobiles. TODO: Research this when you understand Vk better.
-
         let subpass_desc = vk::SubpassDescription {
             flags: vk::SubpassDescriptionFlags::empty(),
             pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
@@ -575,15 +582,125 @@ impl Renderer {
             framebuffers.push(framebuffer);
         }
         // ________________________________________________________________________________________________________________
+
+        // VERTEX CREATION AND BINDING DESC & ATTRIBUTE DESCS:__________________________________________________________________
+        let vertices = vec![
+            Vertex{
+                pos:   [-0.9, -0.9],
+                color: [1.0, 0.0, 0.0]
+            },
+            Vertex{
+                pos:   [-0.9, 0.9],
+                color: [0.0, 1.0, 0.0]
+            },
+            Vertex{
+                pos:   [0.9, 0.9],
+                color: [0.0, 0.0, 1.0]
+            },
+            /*Vertex{
+                pos:   [-0.9, -0.9],
+                color: [1.0, 0.0, 0.0]
+            },
+            Vertex{
+                pos:   [0.9, 0.9],
+                color: [0.0, 0.0, 1.0]
+            },
+            Vertex{
+                pos:   [0.9, -0.9],
+                color: [0.0, 0.0, 1.0]
+            }*/
+            ];
+
+        let vertex_input_binding_desc = vk::VertexInputBindingDescription {
+            binding: 0,
+            stride: std::mem::size_of::<Vertex>() as u32,
+            input_rate: vk::VertexInputRate::VERTEX,
+        };
+        let vertex_input_binding_descriptions = [vertex_input_binding_desc];
+        let vertex_input_attribute_desc1 = vk::VertexInputAttributeDescription{
+            location: 0,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: 0,
+        };
+        let vertex_input_attribute_desc2 = vk::VertexInputAttributeDescription{
+            location: 1,
+            binding: 0,
+            format: vk::Format::R32G32B32_SFLOAT,
+            offset: std::mem::size_of_val(&vertices[0].pos) as u32
+        };
+        let vertex_input_attribute_descriptions = [vertex_input_attribute_desc1, vertex_input_attribute_desc2];
+        // ________________________________________________________________________________________________________________
+
+        // CREATE VERTICES BUFFER AND ALLOCATE IT:_________________________________________________________________________
+        let vertex_buffer_create_info = vk::BufferCreateInfo {
+            s_type: vk::StructureType::BUFFER_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::BufferCreateFlags::empty(),
+            size: (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
+            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            queue_family_index_count: 1,
+            p_queue_family_indices: &graphics_queue_family_idx,
+        };        
+        // When you create a buffer, it is not allocated yet. You have to allocate it too.
+        let vertex_buffer = unsafe{device.create_buffer(&vertex_buffer_create_info, None)}.unwrap();
+
+        let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
+        { // List all memory types and memory heaps:
+            for idx in 0..physical_device_memory_properties.memory_type_count as usize {
+                println!("[{idx}] {:?}", physical_device_memory_properties.memory_types[idx]);
+            }
+            for idx in 0..physical_device_memory_properties.memory_heap_count as usize{
+                println!("[{idx}] {:?}", physical_device_memory_properties.memory_heaps[idx]);
+            }
+        }
+
+        // Find (host visible and host coherent) in memory types AND this is suitable for buffer memory requirements:
+        // Info: Host coherent memory does not need flushing or invalidating.
+        let mut memory_type_idx = 0;
+        let vertex_buffer_memory_requirements = unsafe{device.get_buffer_memory_requirements(vertex_buffer)};
+        for (idx, memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
+            if memory_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE) &&
+               memory_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT) &&
+               ((1 << idx) & vertex_buffer_memory_requirements.memory_type_bits) == (1 << idx) {
+                memory_type_idx = idx;
+                break;
+            }
+        }
+        println!("vertices vector needs: {} bytes in device memory.", {vertex_buffer_memory_requirements.size});
+        println!("vertex buffer supported memory type bits: {:b}",vertex_buffer_memory_requirements.memory_type_bits);
+        println!("found memory_type_idx: {}", memory_type_idx);
+
+        let vertex_buffer_mem_alloc_info = vk::MemoryAllocateInfo {
+            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            // Note: Actual VRAM size might be different from RAM memory, cuz of alignments(I guess).
+            allocation_size: vertex_buffer_memory_requirements.size as u64,
+            memory_type_index: memory_type_idx as u32,
+        };
+        let vertex_buffer_device_memory = unsafe{device.allocate_memory(&vertex_buffer_mem_alloc_info, None)}.unwrap();
+
+        // Need to bind them too! This way, you can have more than one buffers that can be bound to a single device memory via offsets.
+        unsafe{
+        device.bind_buffer_memory(vertex_buffer, vertex_buffer_device_memory, 0).unwrap();
+        
+        // Copy actual RAM to VRAM by direct mapping.
+        let data_ptr = device.map_memory(vertex_buffer_device_memory, 0, vertex_buffer_memory_requirements.size, vk::MemoryMapFlags::empty()).unwrap();
+            std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const c_void, data_ptr, vertex_buffer_memory_requirements.size as usize);
+        device.unmap_memory(vertex_buffer_device_memory);
+        }
+        // ________________________________________________________________________________________________________________
+
         // GRAPHICS PIPELINE: _____________________________________________________________________________________________
         let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineVertexInputStateCreateFlags::empty(),
-            vertex_binding_description_count: 0,
-            p_vertex_binding_descriptions: ptr::null(),
-            vertex_attribute_description_count: 0,
-            p_vertex_attribute_descriptions: ptr::null()
+            vertex_binding_description_count: vertex_input_binding_descriptions.len() as u32,
+            p_vertex_binding_descriptions: vertex_input_binding_descriptions.as_ptr(),
+            vertex_attribute_description_count: vertex_input_attribute_descriptions.len() as u32,
+            p_vertex_attribute_descriptions: vertex_input_attribute_descriptions.as_ptr()
         };
         // Primitives are assembled according to the InputAssemblyState. 
         let input_assembly_state_create_info = vk::PipelineInputAssemblyStateCreateInfo {
@@ -611,7 +728,7 @@ impl Renderer {
             rasterizer_discard_enable: vk::FALSE, //
             polygon_mode: vk::PolygonMode::FILL,
             cull_mode: vk::CullModeFlags::BACK,
-            front_face: vk::FrontFace::CLOCKWISE,
+            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
             // The rasterizer can alter the depth values by adding a constant value or biasing them based on a fragment's slope.
             depth_bias_enable: vk::FALSE,
             depth_bias_constant_factor: 0.0f32,
@@ -772,7 +889,10 @@ impl Renderer {
             render_finished_semaphores,
             queue_submit_finished_fences,
             frames_in_flight_count,
-            current_frame_in_flight_idx: 0
+            current_frame_in_flight_idx: 0,
+
+            vertices,
+            vertex_buffer 
         }
     }
     fn render_frame (&mut self, window_inner_size: &winit::dpi::PhysicalSize<u32>) {
@@ -836,16 +956,19 @@ impl Renderer {
         };
         
         // COMMAND BUFFER RECORDING:
-        unsafe{self.device.reset_command_buffer(self.command_buffers[self.current_frame_in_flight_idx], vk::CommandBufferResetFlags::empty())}.unwrap();
+        unsafe {
+        self.device.reset_command_buffer(self.command_buffers[self.current_frame_in_flight_idx], vk::CommandBufferResetFlags::empty()).unwrap();
         
-        unsafe{self.device.begin_command_buffer(self.command_buffers[self.current_frame_in_flight_idx], &command_buffer_begin_info)}.unwrap();
-            unsafe{self.device.cmd_begin_render_pass(self.command_buffers[self.current_frame_in_flight_idx], &render_pass_begin_info, vk::SubpassContents::INLINE)};
-                unsafe{self.device.cmd_set_viewport(self.command_buffers[self.current_frame_in_flight_idx], 0, &[viewport])};
-                unsafe{self.device.cmd_set_scissor(self.command_buffers[self.current_frame_in_flight_idx], 0, &[scissor])};
-                unsafe{self.device.cmd_bind_pipeline(self.command_buffers[self.current_frame_in_flight_idx], vk::PipelineBindPoint::GRAPHICS, self.graphics_pipelines[0])};
-                unsafe{self.device.cmd_draw(self.command_buffers[self.current_frame_in_flight_idx], 3, 1, 0, 0)};
-            unsafe{self.device.cmd_end_render_pass(self.command_buffers[self.current_frame_in_flight_idx])};
-        unsafe{self.device.end_command_buffer(self.command_buffers[self.current_frame_in_flight_idx])}.unwrap();
+        self.device.begin_command_buffer(self.command_buffers[self.current_frame_in_flight_idx], &command_buffer_begin_info).unwrap();
+            self.device.cmd_begin_render_pass(self.command_buffers[self.current_frame_in_flight_idx], &render_pass_begin_info, vk::SubpassContents::INLINE);
+                self.device.cmd_set_viewport(self.command_buffers[self.current_frame_in_flight_idx], 0, &[viewport]);
+                self.device.cmd_set_scissor(self.command_buffers[self.current_frame_in_flight_idx], 0, &[scissor]);
+                self.device.cmd_bind_pipeline(self.command_buffers[self.current_frame_in_flight_idx], vk::PipelineBindPoint::GRAPHICS, self.graphics_pipelines[0]);
+                self.device.cmd_bind_vertex_buffers(self.command_buffers[self.current_frame_in_flight_idx], 0, &[self.vertex_buffer], &[0]);
+                self.device.cmd_draw(self.command_buffers[self.current_frame_in_flight_idx], self.vertices.len() as u32, 1, 0, 0);
+            self.device.cmd_end_render_pass(self.command_buffers[self.current_frame_in_flight_idx]);
+        self.device.end_command_buffer(self.command_buffers[self.current_frame_in_flight_idx]).unwrap();
+        }
     
         // SUBMITTING:
         let submit_info = vk::SubmitInfo {
