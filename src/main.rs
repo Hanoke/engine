@@ -293,7 +293,7 @@ struct Renderer {
     pipeline_layout: vk::PipelineLayout,
     graphics_pipelines: Vec<vk::Pipeline>,
     command_pool: vk::CommandPool,
-    command_buffers: Vec<vk::CommandBuffer>,
+    cmd_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
     queue_submit_finished_fences: Vec<vk::Fence>,
@@ -606,19 +606,10 @@ impl Renderer {
                 pos:   [0.9, 0.9],
                 color: [0.0, 0.0, 1.0]
             },
-            /*Vertex{
-                pos:   [-0.9, -0.9],
-                color: [1.0, 0.0, 0.0]
-            },
-            Vertex{
-                pos:   [0.9, 0.9],
-                color: [0.0, 0.0, 1.0]
-            },
             Vertex{
                 pos:   [0.9, -0.9],
                 color: [0.0, 0.0, 1.0]
-            }*/
-            ];
+            }];
 
         let vertex_input_binding_desc = vk::VertexInputBindingDescription {
             binding: 0,
@@ -969,7 +960,7 @@ impl Renderer {
             pipeline_layout,
             graphics_pipelines,
             command_pool,
-            command_buffers,
+            cmd_buffers: command_buffers,
             image_available_semaphores,
             render_finished_semaphores,
             queue_submit_finished_fences,
@@ -1045,17 +1036,18 @@ impl Renderer {
         
         // COMMAND BUFFER RECORDING:
         unsafe {
-        self.device.reset_command_buffer(self.command_buffers[self.current_frame_in_flight_idx], vk::CommandBufferResetFlags::empty()).unwrap();
+        self.device.reset_command_buffer(self.cmd_buffers[self.current_frame_in_flight_idx], vk::CommandBufferResetFlags::empty()).unwrap();
         
-        self.device.begin_command_buffer(self.command_buffers[self.current_frame_in_flight_idx], &command_buffer_begin_info).unwrap();
-            self.device.cmd_begin_render_pass(self.command_buffers[self.current_frame_in_flight_idx], &render_pass_begin_info, vk::SubpassContents::INLINE);
-                self.device.cmd_set_viewport(self.command_buffers[self.current_frame_in_flight_idx], 0, &[viewport]);
-                self.device.cmd_set_scissor(self.command_buffers[self.current_frame_in_flight_idx], 0, &[scissor]);
-                self.device.cmd_bind_pipeline(self.command_buffers[self.current_frame_in_flight_idx], vk::PipelineBindPoint::GRAPHICS, self.graphics_pipelines[0]);
-                self.device.cmd_bind_vertex_buffers(self.command_buffers[self.current_frame_in_flight_idx], 0, &[self.vertex_buffer], &[0]);
-                self.device.cmd_draw(self.command_buffers[self.current_frame_in_flight_idx], self.vertices.len() as u32, 1, 0, 0);
-            self.device.cmd_end_render_pass(self.command_buffers[self.current_frame_in_flight_idx]);
-        self.device.end_command_buffer(self.command_buffers[self.current_frame_in_flight_idx]).unwrap();
+        self.device.begin_command_buffer(self.cmd_buffers[self.current_frame_in_flight_idx], &command_buffer_begin_info).unwrap();
+            self.device.cmd_begin_render_pass(self.cmd_buffers[self.current_frame_in_flight_idx], &render_pass_begin_info, vk::SubpassContents::INLINE);
+                self.device.cmd_set_viewport(self.cmd_buffers[self.current_frame_in_flight_idx], 0, &[viewport]);
+                self.device.cmd_set_scissor(self.cmd_buffers[self.current_frame_in_flight_idx], 0, &[scissor]);
+                self.device.cmd_bind_pipeline(self.cmd_buffers[self.current_frame_in_flight_idx], vk::PipelineBindPoint::GRAPHICS, self.graphics_pipelines[0]);
+                self.device.cmd_bind_vertex_buffers(self.cmd_buffers[self.current_frame_in_flight_idx], 0, &[self.vertex_buffer], &[0]);
+                self.device.cmd_bind_index_buffer(self.cmd_buffers[self.current_frame_in_flight_idx], self.index_buffer, 0, vk::IndexType::UINT16);
+                self.device.cmd_draw_indexed(self.cmd_buffers[self.current_frame_in_flight_idx], self.vertices.len() as u32, 1, 0, 0);
+            self.device.cmd_end_render_pass(self.cmd_buffers[self.current_frame_in_flight_idx]);
+        self.device.end_command_buffer(self.cmd_buffers[self.current_frame_in_flight_idx]).unwrap();
         }
     
         // SUBMITTING:
@@ -1066,7 +1058,7 @@ impl Renderer {
             p_wait_semaphores: &self.image_available_semaphores[self.current_frame_in_flight_idx],
             p_wait_dst_stage_mask: &vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
             command_buffer_count: 1,
-            p_command_buffers: &self.command_buffers[self.current_frame_in_flight_idx],
+            p_command_buffers: &self.cmd_buffers[self.current_frame_in_flight_idx],
             signal_semaphore_count: 1,
             p_signal_semaphores: &self.render_finished_semaphores[self.current_frame_in_flight_idx],
         };
