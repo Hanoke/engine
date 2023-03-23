@@ -244,10 +244,10 @@ fn get_swapchain_min_image_count(wanted_image_count: u32, surface_loader: &exten
     let capabilities = 
         unsafe{surface_loader.get_physical_device_surface_capabilities(*physical_device, *surface)}.unwrap();
     if wanted_image_count >= capabilities.min_image_count && wanted_image_count <= capabilities.max_image_count {
-        println!("swapchain image count is set to: '{}'", wanted_image_count);
+        println!("swapchain minimum required image count is: '{}'", wanted_image_count);
         return wanted_image_count;
     }
-    panic!("Wanted swapchain image count is out of bounds of swapchain can have!");
+    panic!("Wanted minimum swapchain image count is out of bounds of swapchain can have!");
 }
 
 fn get_pre_transform_and_composite_alpha(surface_loader: &extensions::khr::Surface, physical_device: &vk::PhysicalDevice, surface: &vk::SurfaceKHR)
@@ -265,7 +265,6 @@ struct Vertex {
     color: [f32; 3]
 }
 
-// TODO: Do clean-up in Drop trait.
 #[allow(dead_code)]
 struct Renderer {
     entry: ash::Entry,
@@ -384,7 +383,7 @@ impl Renderer {
                 p_next: ptr::null(),
                 flags: vk::SwapchainCreateFlagsKHR::empty(),
                 surface: win32_surface,
-                min_image_count: swapchain_min_image_count,
+                min_image_count: swapchain_min_image_count, // Swapchain will create images with ATLEAST requested amount or more.
                 image_format: surface_format,
                 image_color_space: surface_color_space,
                 image_extent: vk::Extent2D{height: window_inner_size.height, width: window_inner_size.width},
@@ -417,6 +416,7 @@ impl Renderer {
 
         // CREATE IMAGEVIEWS OF SWAPCHAIN IMAGES: _________________________________________________________________________
         let swapchain_images = unsafe{swapchain_loader.get_swapchain_images(swapchain)}.unwrap();
+        let swapchain_image_count = swapchain_images.len();
         let mut swapchain_image_views = Vec::<vk::ImageView>::with_capacity(swapchain_images.len());
         for image in &swapchain_images {
             let image_view_create_info = vk::ImageViewCreateInfo {
@@ -827,9 +827,9 @@ impl Renderer {
             p_next: ptr::null(),
             flags: vk::SemaphoreCreateFlags::empty(),
         };
-        let mut image_available_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_min_image_count as usize);
-        let mut render_finished_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_min_image_count as usize);
-        for _ in 0..swapchain_min_image_count {
+        let mut image_available_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_image_count as usize);
+        let mut render_finished_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_image_count as usize);
+        for _ in 0..swapchain_image_count {
             image_available_semaphores.push(unsafe{device.create_semaphore(&semaphore_create_info, None)}.unwrap());
             render_finished_semaphores.push(unsafe{device.create_semaphore(&semaphore_create_info, None)}.unwrap());
         }
@@ -839,8 +839,8 @@ impl Renderer {
             p_next: ptr::null(),
             flags: vk::FenceCreateFlags::SIGNALED
         };
-        let mut queue_submit_finished_fences = Vec::<vk::Fence>::with_capacity(swapchain_min_image_count as usize);
-        for _ in 0..swapchain_min_image_count {
+        let mut queue_submit_finished_fences = Vec::<vk::Fence>::with_capacity(swapchain_image_count as usize);
+        for _ in 0..swapchain_image_count {
             queue_submit_finished_fences.push(unsafe{device.create_fence(&fence_create_info, None)}.unwrap());   
         }
         //_________________________________________________________________________________________________________________
@@ -862,7 +862,7 @@ impl Renderer {
             p_next: ptr::null(),
             command_pool: command_pool,
             level: vk::CommandBufferLevel::PRIMARY,
-            command_buffer_count: swapchain_min_image_count,
+            command_buffer_count: swapchain_image_count as u32,
         };
         let command_buffers = unsafe{device.allocate_command_buffers(&command_buffer_alloc_info)}.unwrap();
         //_________________________________________________________________________________________________________________
@@ -1152,7 +1152,7 @@ fn main() {
     let window = winit::window::WindowBuilder::new().build(&event_loop).expect("Could not create a window.");
     let mut renderer = Renderer::new(&window, 2);
 
-     // This bool is needed because WindowEvent::Resized is sent when program starts with incorrect height and width:
+     // This bool is needed because WindowEvent::Resized with incorrect height and width is sent when program starts:
      // https://github.com/rust-windowing/winit/issues/2094
     let mut is_first_resized_event  = true;
     
