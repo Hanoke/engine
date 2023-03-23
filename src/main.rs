@@ -156,7 +156,7 @@ fn get_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
 }
 
 /// This is the **index** of graphics queue family inside the array returned from vkGetPhysicalDeviceQueueFamilyProperties.
-/// GRAPHICS QUEUE always can do TRANSFER operations, even if it does not say it has the property of TRANSFER.
+/// GRAPHICS QUEUE always can do TRANSFER operations, even if it does not say the GRAPHICS QUEUE has TRANSFER_BIT.
 fn get_graphics_queue_family_idx(instance: &ash::Instance, physical_device: &vk::PhysicalDevice, 
         surface_loader: &extensions::khr::Surface, surface: &vk::SurfaceKHR) -> u32 {
     let available_queue_family_props = 
@@ -167,8 +167,10 @@ fn get_graphics_queue_family_idx(instance: &ash::Instance, physical_device: &vk:
             let has_presentation_support = unsafe{
                 surface_loader.get_physical_device_surface_support(*physical_device, queue_family_idx as u32, *surface)
             }.unwrap();
-            if has_presentation_support {
-                println!("Found the GRAPHICS queue family with presentation support at index: '{}'", queue_family_idx);
+            let has_transfer_support = queue_family_prop.queue_flags.contains(vk::QueueFlags::TRANSFER);
+            if has_presentation_support && has_transfer_support {
+                println!("Found the GRAPHICS queue family with presentation support and transfer support at index: '{}'",
+                     queue_family_idx);
                 return queue_family_idx as u32;
             }
         }
@@ -300,7 +302,9 @@ struct Renderer {
 
     vertices: Vec<Vertex>,
     vertex_buffer: vk::Buffer,
-    vertex_buffer_device_memory: vk::DeviceMemory
+    vertex_buffer_staging: vk::Buffer,
+    vertex_buffer_device_memory: vk::DeviceMemory,
+    vertex_buffer_staging_device_memory: vk::DeviceMemory
 }
 
 impl Renderer {
@@ -637,20 +641,7 @@ impl Renderer {
         let vertex_input_attribute_descriptions = [vertex_input_attribute_desc1, vertex_input_attribute_desc2];
         // ________________________________________________________________________________________________________________
 
-        // CREATE VERTICES BUFFER AND ALLOCATE IT:_________________________________________________________________________
-        let vertex_buffer_create_info = vk::BufferCreateInfo {
-            s_type: vk::StructureType::BUFFER_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::BufferCreateFlags::empty(),
-            size: (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
-            usage: vk::BufferUsageFlags::VERTEX_BUFFER,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            queue_family_index_count: 1,
-            p_queue_family_indices: &graphics_queue_family_idx,
-        };        
-        // When you create a buffer, it is not allocated yet. You have to allocate it too.
-        let vertex_buffer = unsafe{device.create_buffer(&vertex_buffer_create_info, None)}.unwrap();
-
+        // CREATE VERTICES BUFFER AND ALLOCATE IT:_________________________________________________________________________,
         let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
         { // List all memory types and memory heaps:
             for idx in 0..physical_device_memory_properties.memory_type_count as usize {
@@ -661,39 +652,71 @@ impl Renderer {
             }
         }
 
-        // Find (host visible and host coherent) in memory types AND this is suitable for buffer memory requirements:
-        // Info: Host coherent memory does not need flushing or invalidating.
-        let mut memory_type_idx = 0;
-        let vertex_buffer_memory_requirements = unsafe{device.get_buffer_memory_requirements(vertex_buffer)};
-        for (idx, memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
-            if memory_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE) &&
-               memory_type.property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT) &&
-               ((1 << idx) & vertex_buffer_memory_requirements.memory_type_bits) == (1 << idx) {
-                memory_type_idx = idx;
-                break;
+        let create_buffer = |size: u64, usage: vk::BufferUsageFlags, required_memory_flags: vk::MemoryPropertyFlags| 
+        -> (vk::Buffer, vk::DeviceMemory, vk::DeviceSize) {
+            let buffer_create_info = vk::BufferCreateInfo {
+                s_type: vk::StructureType::BUFFER_CREATE_INFO,
+                p_next: ptr::null(),
+                flags: vk::BufferCreateFlags::empty(),
+                size: size,
+                usage: usage,
+                sharing_mode: vk::SharingMode::EXCLUSIVE,
+                queue_family_index_count: 1,
+                p_queue_family_indices: &graphics_queue_family_idx,
+            };
+
+            let buffer = unsafe{device.create_buffer(&buffer_create_info, None)}.unwrap();
+
+            let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
+
+            let mut memory_type_idx = 0;
+            let buffer_memory_requirements = unsafe{device.get_buffer_memory_requirements(buffer)};
+            println!("Buffer supported memory type bits: {:b}", buffer_memory_requirements.memory_type_bits);
+            
+            // Find required memory type in memory types AND this is suitable for the newly created buffer memory requirements:
+            // Info: Host coherent memory does not need flushing or invalidating.
+            for (idx, physical_device_memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
+                if physical_device_memory_type.property_flags.contains(required_memory_flags) &&
+                ((1 << idx) & buffer_memory_requirements.memory_type_bits) == (1 << idx) {
+                    memory_type_idx = idx;
+                    break;
+                }
             }
-        }
-        println!("vertices vector needs: {} bytes in device memory.", {vertex_buffer_memory_requirements.size});
-        println!("vertex buffer supported memory type bits: {:b}",vertex_buffer_memory_requirements.memory_type_bits);
-        println!("found memory_type_idx: {}", memory_type_idx);
+            println!("found memory_type_idx: {}", memory_type_idx);
+            
+            let buffer_mem_alloc_info = vk::MemoryAllocateInfo {
+                s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+                p_next: ptr::null(),
+                // Note: Actual VRAM size might be different from RAM memory, cuz of alignments(I guess).
+                allocation_size: buffer_memory_requirements.size as u64,
+                memory_type_index: memory_type_idx as u32,
+            };
+            let buffer_device_memory = unsafe{device.allocate_memory(&buffer_mem_alloc_info, None)}.unwrap();
+            
+            // Need to bind them too! This way, you can have more than one buffers that can be bound to a single device memory via offsets.
+            unsafe{device.bind_buffer_memory(buffer, buffer_device_memory, 0)}.unwrap();
 
-        let vertex_buffer_mem_alloc_info = vk::MemoryAllocateInfo {
-            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            // Note: Actual VRAM size might be different from RAM memory, cuz of alignments(I guess).
-            allocation_size: vertex_buffer_memory_requirements.size as u64,
-            memory_type_index: memory_type_idx as u32,
+            (buffer, buffer_device_memory, buffer_memory_requirements.size) 
         };
-        let vertex_buffer_device_memory = unsafe{device.allocate_memory(&vertex_buffer_mem_alloc_info, None)}.unwrap();
 
-        // Need to bind them too! This way, you can have more than one buffers that can be bound to a single device memory via offsets.
-        unsafe{
-        device.bind_buffer_memory(vertex_buffer, vertex_buffer_device_memory, 0).unwrap();
+        let (vertex_buffer_staging, vertex_buffer_staging_device_memory, vertex_buffer_staging_memory_size) = 
+            create_buffer(
+                (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+            );
+        let (vertex_buffer, vertex_buffer_device_memory, vertex_buffer_memory_size) = 
+            create_buffer(
+                (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL
+            );
         
-        // Copy actual RAM to VRAM by direct mapping.
-        let data_ptr = device.map_memory(vertex_buffer_device_memory, 0, vertex_buffer_memory_requirements.size, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const c_void, data_ptr, vertex_buffer_memory_requirements.size as usize);
-        device.unmap_memory(vertex_buffer_device_memory);
+        // Copy actual RAM to VRAM by direct mapping:
+        unsafe{
+        let data_ptr = device.map_memory(vertex_buffer_staging_device_memory, 0, vertex_buffer_staging_memory_size, vk::MemoryMapFlags::empty()).unwrap();
+            std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const c_void, data_ptr, vertex_buffer_staging_memory_size as usize);
+        device.unmap_memory(vertex_buffer_staging_device_memory);
         }
         // ________________________________________________________________________________________________________________
 
@@ -856,7 +879,7 @@ impl Renderer {
         let command_pool = unsafe{device.create_command_pool(&command_pool_create_info, None)}.unwrap();
         //_________________________________________________________________________________________________________________
         
-        // COMMAND BUFFER(S) ALLOCATION:______________________________________________________________________________________
+        // COMMAND BUFFER(S) ALLOCATION:___________________________________________________________________________________
         let command_buffer_alloc_info = vk::CommandBufferAllocateInfo {
             s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
             p_next: ptr::null(),
@@ -865,6 +888,60 @@ impl Renderer {
             command_buffer_count: swapchain_image_count as u32,
         };
         let command_buffers = unsafe{device.allocate_command_buffers(&command_buffer_alloc_info)}.unwrap();
+        //_________________________________________________________________________________________________________________
+
+        // Transfer VERTICES FROM STAGING BUFFER TO DEVICE_LOCAL BUFFER:___________________________________________________
+        let transfer_cmd_pool_create_info = vk::CommandPoolCreateInfo {
+            s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::CommandPoolCreateFlags::TRANSIENT,
+            queue_family_index: graphics_queue_family_idx, // GRAPHICS are implicitle supports TRANSFER.
+        };
+        let transfer_cmd_pool = unsafe{device.create_command_pool(&transfer_cmd_pool_create_info, None)}.unwrap();
+
+        let transfer_cmd_buffer_alloc_info = vk::CommandBufferAllocateInfo{
+            s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            command_pool: transfer_cmd_pool,
+            level: vk::CommandBufferLevel::PRIMARY,
+            command_buffer_count: 1,
+        };
+        let transfer_cmd_buffer = unsafe{device.allocate_command_buffers(&transfer_cmd_buffer_alloc_info)}.unwrap()[0];
+        let transfer_cmd_buffer_begin_info = vk::CommandBufferBeginInfo {
+            s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
+            p_next: ptr::null(),
+            flags: vk::CommandBufferUsageFlags::empty(),
+            p_inheritance_info: ptr::null(),
+        };
+        unsafe{
+        device.begin_command_buffer(transfer_cmd_buffer, &transfer_cmd_buffer_begin_info).unwrap();
+            let region = vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: vertex_buffer_staging_memory_size,
+            };
+            device.cmd_copy_buffer(transfer_cmd_buffer, vertex_buffer_staging, vertex_buffer, &[region]);
+        device.end_command_buffer(transfer_cmd_buffer).unwrap();
+        
+        let submit_info = vk::SubmitInfo {
+            s_type: vk::StructureType::SUBMIT_INFO,
+            p_next: ptr::null(),
+            wait_semaphore_count: 0,
+            p_wait_semaphores: ptr::null(),
+            p_wait_dst_stage_mask: ptr::null(),
+            command_buffer_count: 1,
+            p_command_buffers: &transfer_cmd_buffer,
+            signal_semaphore_count: 0,
+            p_signal_semaphores: ptr::null(),
+        };
+        device.queue_submit(graphics_queue, &[submit_info], vk::Fence::null()).unwrap();
+        println!("Copied vertices from Staging buffer into Device local buffer.");
+        
+        // Wait for the queue to end its job before destroying it.
+        device.queue_wait_idle(graphics_queue).unwrap(); 
+        // Cmdbuffers created from the pool is automatically freed when destroyed the command pool.
+        device.destroy_command_pool(transfer_cmd_pool, None); 
+        }
         //_________________________________________________________________________________________________________________
 
         Renderer {
@@ -901,7 +978,9 @@ impl Renderer {
 
             vertices,
             vertex_buffer,
-            vertex_buffer_device_memory
+            vertex_buffer_staging,
+            vertex_buffer_device_memory,
+            vertex_buffer_staging_device_memory
         }
     }
     fn render_frame (&mut self, window_inner_size: &winit::dpi::PhysicalSize<u32>) {
@@ -1111,7 +1190,7 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe{
         self.device.device_wait_idle().unwrap();
-        // Command buffers are automatically destroyed when corresponding Commandpools are destroyed.
+        // Command buffers are automatically freed when corresponding Commandpools are destroyed.
         self.device.destroy_command_pool(self.command_pool, None);
         for fence in &self.queue_submit_finished_fences {
             self.device.destroy_fence(*fence, None);
@@ -1127,7 +1206,9 @@ impl Drop for Renderer {
         }
         self.device.destroy_pipeline_layout(self.pipeline_layout, None);
         self.device.destroy_buffer(self.vertex_buffer, None);
+        self.device.destroy_buffer(self.vertex_buffer_staging, None);
         self.device.free_memory(self.vertex_buffer_device_memory, None);
+        self.device.free_memory(self.vertex_buffer_staging_device_memory, None);
         for framebuffer in &self.framebuffers {
             self.device.destroy_framebuffer(*framebuffer, None);
         }
