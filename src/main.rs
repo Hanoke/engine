@@ -156,6 +156,7 @@ fn get_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
 }
 
 /// This is the **index** of graphics queue family inside the array returned from vkGetPhysicalDeviceQueueFamilyProperties.
+/// GRAPHICS QUEUE always can do TRANSFER operations, even if it does not say it has the property of TRANSFER.
 fn get_graphics_queue_family_idx(instance: &ash::Instance, physical_device: &vk::PhysicalDevice, 
         surface_loader: &extensions::khr::Surface, surface: &vk::SurfaceKHR) -> u32 {
     let available_queue_family_props = 
@@ -284,8 +285,11 @@ struct Renderer {
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
     swapchain_min_image_count: u32,
+    vertex_shader_module: vk::ShaderModule,
+    fragment_shader_module: vk::ShaderModule,
     render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
+    pipeline_layout: vk::PipelineLayout,
     graphics_pipelines: Vec<vk::Pipeline>,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
@@ -296,7 +300,8 @@ struct Renderer {
     current_frame_in_flight_idx: usize,
 
     vertices: Vec<Vertex>,
-    vertex_buffer: vk::Buffer
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_device_memory: vk::DeviceMemory
 }
 
 impl Renderer {
@@ -880,8 +885,11 @@ impl Renderer {
             swapchain_images,
             swapchain_image_views,
             swapchain_min_image_count,
+            vertex_shader_module,
+            fragment_shader_module,
             render_pass,
             framebuffers,
+            pipeline_layout,
             graphics_pipelines,
             command_pool,
             command_buffers,
@@ -892,7 +900,8 @@ impl Renderer {
             current_frame_in_flight_idx: 0,
 
             vertices,
-            vertex_buffer 
+            vertex_buffer,
+            vertex_buffer_device_memory
         }
     }
     fn render_frame (&mut self, window_inner_size: &winit::dpi::PhysicalSize<u32>) {
@@ -1095,6 +1104,46 @@ impl Renderer {
     fn window_resized(&mut self, window_new_inner_size: &winit::dpi::PhysicalSize<u32>) {
         unsafe{self.device.device_wait_idle()}.unwrap();
         self.recreate_swapchain(&window_new_inner_size);
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        unsafe{
+        self.device.device_wait_idle().unwrap();
+        // Command buffers are automatically destroyed when corresponding Commandpools are destroyed.
+        self.device.destroy_command_pool(self.command_pool, None);
+        for fence in &self.queue_submit_finished_fences {
+            self.device.destroy_fence(*fence, None);
+        }
+        for semaphore in &self.image_available_semaphores {
+            self.device.destroy_semaphore(*semaphore, None);
+        }
+        for semaphore in &self.render_finished_semaphores {
+            self.device.destroy_semaphore(*semaphore, None);
+        }
+        for pipeline in &self.graphics_pipelines {
+            self.device.destroy_pipeline(*pipeline, None);
+        }
+        self.device.destroy_pipeline_layout(self.pipeline_layout, None);
+        self.device.destroy_buffer(self.vertex_buffer, None);
+        self.device.free_memory(self.vertex_buffer_device_memory, None);
+        for framebuffer in &self.framebuffers {
+            self.device.destroy_framebuffer(*framebuffer, None);
+        }
+        self.device.destroy_render_pass(self.render_pass, None);
+        self.device.destroy_shader_module(self.vertex_shader_module, None);
+        self.device.destroy_shader_module(self.fragment_shader_module, None);
+        for image_view in &self.swapchain_image_views {
+            self.device.destroy_image_view(*image_view, None);
+        }
+        // Swapchain images are automatically destroyed when swapchain is destroyed.     
+        self.swapchain_loader.destroy_swapchain(self.swapchain, None);
+        self.surface_loader.destroy_surface(self.surface, None);
+        self.device.destroy_device(None);
+        self.instance.destroy_instance(None);
+        }
+        println!("Renderer is dropped!");
     }
 }
 
