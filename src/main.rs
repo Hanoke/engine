@@ -162,6 +162,8 @@ fn get_graphics_queue_family_idx(instance: &ash::Instance, physical_device: &vk:
     let available_queue_family_props = 
         unsafe{instance.get_physical_device_queue_family_properties(*physical_device)};
 
+        println!("\nPhysical device queue family properties:\n{available_queue_family_props:?}\n");
+
     for (queue_family_idx, queue_family_prop) in available_queue_family_props.iter().enumerate() {
         if queue_family_prop.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
             let has_presentation_support = unsafe{
@@ -262,6 +264,7 @@ fn get_pre_transform_and_composite_alpha(surface_loader: &extensions::khr::Surfa
     (capabilities.current_transform, capabilities.supported_composite_alpha)
 }
 
+type IndexBufferElementType = u16;
 struct Vertex {
     pos: [f32; 2],
     color: [f32; 3]
@@ -301,10 +304,15 @@ struct Renderer {
     current_frame_in_flight_idx: usize,
 
     vertices: Vec<Vertex>,
+    indices: Vec<IndexBufferElementType>,
     vertex_buffer: vk::Buffer,
     vertex_buffer_staging: vk::Buffer,
+    index_buffer: vk::Buffer,
+    index_buffer_staging: vk::Buffer,
     vertex_buffer_device_memory: vk::DeviceMemory,
-    vertex_buffer_staging_device_memory: vk::DeviceMemory
+    vertex_buffer_staging_device_memory: vk::DeviceMemory,
+    index_buffer_device_memory: vk::DeviceMemory,
+    index_buffer_staging_device_memory: vk::DeviceMemory,
 }
 
 impl Renderer {
@@ -608,8 +616,9 @@ impl Renderer {
             },
             Vertex{
                 pos:   [0.9, -0.9],
-                color: [0.0, 0.0, 1.0]
+                color: [1.0, 1.0, 1.0]
             }];
+        let indices: Vec<IndexBufferElementType> = vec![0, 1, 2, 0, 2, 3];
 
         let vertex_input_binding_desc = vk::VertexInputBindingDescription {
             binding: 0,
@@ -629,6 +638,7 @@ impl Renderer {
             format: vk::Format::R32G32B32_SFLOAT,
             offset: std::mem::size_of_val(&vertices[0].pos) as u32
         };
+
         let vertex_input_attribute_descriptions = [vertex_input_attribute_desc1, vertex_input_attribute_desc2];
         // ________________________________________________________________________________________________________________
 
@@ -696,19 +706,42 @@ impl Renderer {
                 vk::BufferUsageFlags::TRANSFER_SRC,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
             );
-        let (vertex_buffer, vertex_buffer_device_memory, vertex_buffer_memory_size) = 
-            create_buffer(
-                (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL
-            );
-        
+        let (vertex_buffer, vertex_buffer_device_memory, _vertex_buffer_memory_size) = 
+        create_buffer(
+            (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
+            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL
+        );
         // Copy actual RAM to VRAM by direct mapping:
-        unsafe{
+        unsafe {
         let data_ptr = device.map_memory(vertex_buffer_staging_device_memory, 0, vertex_buffer_staging_memory_size, vk::MemoryMapFlags::empty()).unwrap();
             std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const c_void, data_ptr, vertex_buffer_staging_memory_size as usize);
         device.unmap_memory(vertex_buffer_staging_device_memory);
         }
+
+        let (index_buffer_staging, index_buffer_staging_device_memory, index_buffer_staging_memory_size) = 
+        create_buffer(
+            (indices.len() * std::mem::size_of::<IndexBufferElementType>()) as u64,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+        );
+        let (index_buffer, index_buffer_device_memory, _index_buffer_memory_size) = 
+            create_buffer(
+                (indices.len() * std::mem::size_of::<IndexBufferElementType>()) as u64,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL
+            );
+        unsafe {
+        let data_ptr = device.map_memory(index_buffer_staging_device_memory, 0, index_buffer_staging_memory_size, vk::MemoryMapFlags::empty()).unwrap();
+            std::ptr::copy_nonoverlapping(indices.as_ptr() as *const c_void, data_ptr, index_buffer_staging_memory_size as usize);
+        device.unmap_memory(index_buffer_staging_device_memory);
+        }
+        
+        
+        // ________________________________________________________________________________________________________________
+
+        // DESCRIPTOR SET AND DESCRIPTOR LAYOUT: __________________________________________________________________________
+        
         // ________________________________________________________________________________________________________________
 
         // GRAPHICS PIPELINE: _____________________________________________________________________________________________
@@ -881,12 +914,12 @@ impl Renderer {
         let command_buffers = unsafe{device.allocate_command_buffers(&command_buffer_alloc_info)}.unwrap();
         //_________________________________________________________________________________________________________________
 
-        // Transfer VERTICES FROM STAGING BUFFER TO DEVICE_LOCAL BUFFER:___________________________________________________
+        // Transfer VERTICES/INDICES FROM STAGING BUFFER TO DEVICE_LOCAL BUFFER:___________________________________________________
         let transfer_cmd_pool_create_info = vk::CommandPoolCreateInfo {
             s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::CommandPoolCreateFlags::TRANSIENT,
-            queue_family_index: graphics_queue_family_idx, // GRAPHICS are implicitle supports TRANSFER.
+            queue_family_index: graphics_queue_family_idx, // GRAPHICS implicitly supports TRANSFER.
         };
         let transfer_cmd_pool = unsafe{device.create_command_pool(&transfer_cmd_pool_create_info, None)}.unwrap();
 
@@ -906,12 +939,19 @@ impl Renderer {
         };
         unsafe{
         device.begin_command_buffer(transfer_cmd_buffer, &transfer_cmd_buffer_begin_info).unwrap();
-            let region = vk::BufferCopy {
+            let vertices_copy_region = vk::BufferCopy {
                 src_offset: 0,
                 dst_offset: 0,
                 size: vertex_buffer_staging_memory_size,
             };
-            device.cmd_copy_buffer(transfer_cmd_buffer, vertex_buffer_staging, vertex_buffer, &[region]);
+            device.cmd_copy_buffer(transfer_cmd_buffer, vertex_buffer_staging, vertex_buffer, &[vertices_copy_region]);
+
+            let indices_copy_region = vk::BufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: index_buffer_staging_memory_size,
+            };
+            device.cmd_copy_buffer(transfer_cmd_buffer, index_buffer_staging, index_buffer, &[indices_copy_region]);
         device.end_command_buffer(transfer_cmd_buffer).unwrap();
         
         let submit_info = vk::SubmitInfo {
@@ -968,10 +1008,15 @@ impl Renderer {
             current_frame_in_flight_idx: 0,
 
             vertices,
+            indices,
             vertex_buffer,
             vertex_buffer_staging,
+            index_buffer,
+            index_buffer_staging,
             vertex_buffer_device_memory,
-            vertex_buffer_staging_device_memory
+            vertex_buffer_staging_device_memory,
+            index_buffer_device_memory,
+            index_buffer_staging_device_memory
         }
     }
     fn render_frame (&mut self, window_inner_size: &winit::dpi::PhysicalSize<u32>) {
@@ -982,6 +1027,7 @@ impl Renderer {
             self.swapchain_loader.acquire_next_image(self.swapchain, u64::MAX, 
                 self.image_available_semaphores[self.current_frame_in_flight_idx], vk::Fence::null())
         }.unwrap();
+
         // if self.current_frame_in_flight_idx != swapchain_image_idx as usize {
         //     println!("CURRENT FRAME AND SWAPCHAIN IMAGE IDX ARE NOT SAME: current_frame_idx: {} image_idx: {}", 
         //         self.current_frame_in_flight_idx, swapchain_image_idx);
@@ -1045,7 +1091,7 @@ impl Renderer {
                 self.device.cmd_bind_pipeline(self.cmd_buffers[self.current_frame_in_flight_idx], vk::PipelineBindPoint::GRAPHICS, self.graphics_pipelines[0]);
                 self.device.cmd_bind_vertex_buffers(self.cmd_buffers[self.current_frame_in_flight_idx], 0, &[self.vertex_buffer], &[0]);
                 self.device.cmd_bind_index_buffer(self.cmd_buffers[self.current_frame_in_flight_idx], self.index_buffer, 0, vk::IndexType::UINT16);
-                self.device.cmd_draw_indexed(self.cmd_buffers[self.current_frame_in_flight_idx], self.vertices.len() as u32, 1, 0, 0);
+                self.device.cmd_draw_indexed(self.cmd_buffers[self.current_frame_in_flight_idx], self.indices.len() as u32, 1, 0, 0, 0);
             self.device.cmd_end_render_pass(self.cmd_buffers[self.current_frame_in_flight_idx]);
         self.device.end_command_buffer(self.cmd_buffers[self.current_frame_in_flight_idx]).unwrap();
         }
@@ -1199,8 +1245,12 @@ impl Drop for Renderer {
         self.device.destroy_pipeline_layout(self.pipeline_layout, None);
         self.device.destroy_buffer(self.vertex_buffer, None);
         self.device.destroy_buffer(self.vertex_buffer_staging, None);
+        self.device.destroy_buffer(self.index_buffer, None);
+        self.device.destroy_buffer(self.index_buffer_staging, None);
         self.device.free_memory(self.vertex_buffer_device_memory, None);
         self.device.free_memory(self.vertex_buffer_staging_device_memory, None);
+        self.device.free_memory(self.index_buffer_device_memory, None);
+        self.device.free_memory(self.index_buffer_staging_device_memory, None);
         for framebuffer in &self.framebuffers {
             self.device.destroy_framebuffer(*framebuffer, None);
         }
