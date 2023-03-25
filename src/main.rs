@@ -1,5 +1,5 @@
 use std::{ffi::{CStr, CString, c_void}, io::Read};
-use winit::{event::{KeyboardInput, VirtualKeyCode, ElementState, WindowEvent, Event}, event_loop::ControlFlow, platform::windows::WindowExtWindows};
+use winit::{event::{KeyboardInput, VirtualKeyCode, ElementState, WindowEvent, Event}, event_loop::ControlFlow, platform::windows::{WindowExtWindows, WindowBuilderExtWindows}};
 use std::ptr;
 use ash::{vk::{self, Bool32}, extensions};
 
@@ -270,6 +270,13 @@ struct Vertex {
     color: [f32; 3]
 }
 
+#[repr(C)]
+struct UniformBufferObject {
+    model:       glam::Mat4,
+    view:        glam::Mat4,
+    projection:  glam::Mat4,    
+}
+
 #[allow(dead_code)]
 struct Renderer {
     entry: ash::Entry,
@@ -313,6 +320,15 @@ struct Renderer {
     vertex_buffer_staging_device_memory: vk::DeviceMemory,
     index_buffer_device_memory: vk::DeviceMemory,
     index_buffer_staging_device_memory: vk::DeviceMemory,
+    descriptor_set_layout: vk::DescriptorSetLayout,
+
+    uniform_buffers: Vec<vk::Buffer>,
+    uniform_buffer_device_memories: Vec<vk::DeviceMemory>, 
+    uniform_buffer_mapped_memory_ptrs: Vec<*mut c_void>,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
+
+    start_time: std::time::Instant
 }
 
 impl Renderer {
@@ -339,7 +355,7 @@ impl Renderer {
         let val_layer_names = get_instance_layer_names(&entry); 
         let p_val_layer_names: Vec<*const i8> = val_layer_names.iter().map(|value| {value.as_ptr()}).collect();
 
-        let instance_create_info = vk::InstanceCreateInfo {
+        let instance_ci = vk::InstanceCreateInfo {
             s_type: vk::StructureType::INSTANCE_CREATE_INFO,
             p_next: if cfg!(debug_assertions) {
                 &get_debug_utils_messenger_create_info() as *const vk::DebugUtilsMessengerCreateInfoEXT as *const c_void
@@ -352,7 +368,7 @@ impl Renderer {
             pp_enabled_extension_names: instance_ext_names.as_ptr(),
         };
         let instance = unsafe {
-            entry.create_instance(&instance_create_info, None).expect("Could not create an instance.")
+            entry.create_instance(&instance_ci, None).expect("Could not create an instance.")
         };
         // ________________________________________________________________________________________________________________
         
@@ -360,14 +376,14 @@ impl Renderer {
         // VkSurface object is a platform agnostic high-level object. You need platform specific loader in order to create 
         // a VkSurface like Win32Surface_loader. Then you can create a VkSwapchain from this VkSurface.
         let win32_surface_loader = extensions::khr::Win32Surface::new(&entry, &instance);
-        let win32_surface_create_info = vk::Win32SurfaceCreateInfoKHR {
+        let win32_surface_ci = vk::Win32SurfaceCreateInfoKHR {
             s_type: vk::StructureType::WIN32_SURFACE_CREATE_INFO_KHR,
             p_next: ptr::null(),
             flags: vk::Win32SurfaceCreateFlagsKHR::empty(),
             hinstance: window.hinstance() as vk::HINSTANCE,
             hwnd: window.hwnd() as vk::HWND,
         };
-        let win32_surface = unsafe{win32_surface_loader.create_win32_surface(&win32_surface_create_info, None)}.unwrap();
+        let win32_surface = unsafe{win32_surface_loader.create_win32_surface(&win32_surface_ci, None)}.unwrap();
         // ________________________________________________________________________________________________________________
 
         // CREATE PHYSICAL DEVICE AND LOGICAL DEVICE. FIND GRAPHICS QUEUE IDX:_____________________________________________
@@ -390,7 +406,7 @@ impl Renderer {
             get_pre_transform_and_composite_alpha(&surface_loader, &physical_device, &win32_surface);
             
             let window_inner_size = window.inner_size();
-            let swapchain_create_info = vk::SwapchainCreateInfoKHR {
+            let swapchain_ci = vk::SwapchainCreateInfoKHR {
                 s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
                 p_next: ptr::null(),
                 flags: vk::SwapchainCreateFlagsKHR::empty(),
@@ -423,7 +439,7 @@ impl Renderer {
         };
 
         let swapchain_loader = extensions::khr::Swapchain::new(&instance, &device);
-        let swapchain = unsafe {swapchain_loader.create_swapchain(&swapchain_create_info, None)}.unwrap();
+        let swapchain = unsafe {swapchain_loader.create_swapchain(&swapchain_ci, None)}.unwrap();
         // ________________________________________________________________________________________________________________
 
         // CREATE IMAGEVIEWS OF SWAPCHAIN IMAGES: _________________________________________________________________________
@@ -431,7 +447,7 @@ impl Renderer {
         let swapchain_image_count = swapchain_images.len();
         let mut swapchain_image_views = Vec::<vk::ImageView>::with_capacity(swapchain_images.len());
         for image in &swapchain_images {
-            let image_view_create_info = vk::ImageViewCreateInfo {
+            let image_view_ci = vk::ImageViewCreateInfo {
                 s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
                 p_next: ptr::null(),
                 flags: vk::ImageViewCreateFlags::empty(),
@@ -452,7 +468,7 @@ impl Renderer {
                     layer_count: 1,
                 }
             };
-            let image_view = unsafe{device.create_image_view(&image_view_create_info, None)}.unwrap();
+            let image_view = unsafe{device.create_image_view(&image_view_ci, None)}.unwrap();
             swapchain_image_views.push(image_view);
         }
         // ________________________________________________________________________________________________________________
@@ -463,28 +479,28 @@ impl Renderer {
         let vertex_code: Vec<u8> = vertex_binary_file.bytes().filter_map(|byte| {byte.ok()}).collect();
         let fragment_code: Vec<u8> = fragment_binary_file.bytes().filter_map(|byte| {byte.ok()}).collect();
 
-        let vertex_shader_module_create_info = vk::ShaderModuleCreateInfo {
+        let vertex_shader_module_ci = vk::ShaderModuleCreateInfo {
             s_type: vk::StructureType::SHADER_MODULE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::ShaderModuleCreateFlags::empty(),
             code_size: vertex_code.len(),
             p_code: vertex_code.as_ptr() as *const u32,
         };
-        let fragment_shader_module_create_info = vk::ShaderModuleCreateInfo {
+        let fragment_shader_module_ci = vk::ShaderModuleCreateInfo {
             s_type: vk::StructureType::SHADER_MODULE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::ShaderModuleCreateFlags::empty(),
             code_size: fragment_code.len(),
             p_code: fragment_code.as_ptr() as *const u32,
         };
-        let vertex_shader_module = unsafe {device.create_shader_module(&vertex_shader_module_create_info, None).unwrap()};  
-        let fragment_shader_module = unsafe {device.create_shader_module(&fragment_shader_module_create_info, None)}.unwrap();
+        let vertex_shader_module = unsafe {device.create_shader_module(&vertex_shader_module_ci, None).unwrap()};  
+        let fragment_shader_module = unsafe {device.create_shader_module(&fragment_shader_module_ci, None)}.unwrap();
         // ________________________________________________________________________________________________________________
 
         // CREATE PIPELINE SHADER STAGES: _________________________________________________________________________________
         // Info: These will be passed into PipelineCreateInfo
         let main_function_name = CString::new("main").unwrap();
-        let pipeline_vertex_shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
+        let pipeline_vertex_shader_stage_ci = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineShaderStageCreateFlags::empty(),
@@ -493,7 +509,7 @@ impl Renderer {
             p_name: main_function_name.as_ptr(),
             p_specialization_info: ptr::null(),
         };
-        let pipeline_fragment_shader_stage_create_info = vk::PipelineShaderStageCreateInfo {
+        let pipeline_fragment_shader_stage_ci = vk::PipelineShaderStageCreateInfo {
             s_type: vk::StructureType::PIPELINE_SHADER_STAGE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineShaderStageCreateFlags::empty(),
@@ -503,7 +519,7 @@ impl Renderer {
             p_specialization_info: ptr::null(),
         };
         let pipeline_shader_stages_ci = 
-            [pipeline_vertex_shader_stage_create_info, pipeline_fragment_shader_stage_create_info];
+            [pipeline_vertex_shader_stage_ci, pipeline_fragment_shader_stage_ci];
         // ________________________________________________________________________________________________________________
 
         // CREATE ATTACHMENT DESCRIPTIONS AND ATTACHMENT REFERENCES:_______________________________________________________
@@ -563,7 +579,7 @@ impl Renderer {
             dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE, //  is a bitmask of all the Vulkan memory access types we're going to use in dstSubpass.
             dependency_flags: vk::DependencyFlags::empty(), // 0
         };
-        let render_pass_create_info = vk::RenderPassCreateInfo {
+        let render_pass_ci = vk::RenderPassCreateInfo {
             s_type: vk::StructureType::RENDER_PASS_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::RenderPassCreateFlags::empty(),
@@ -575,7 +591,7 @@ impl Renderer {
             p_dependencies: &subpass_dependency,
         };
 
-        let render_pass = unsafe{device.create_render_pass(&render_pass_create_info, None)}.unwrap();
+        let render_pass = unsafe{device.create_render_pass(&render_pass_ci, None)}.unwrap();
         // ________________________________________________________________________________________________________________
 
         // CREATE FRAMEBUFFER:_____________________________________________________________________________________________
@@ -584,7 +600,7 @@ impl Renderer {
         let mut framebuffers : Vec<vk::Framebuffer> = Vec::with_capacity(swapchain_image_views.len());
         for image_view in &swapchain_image_views {
             let attachments = [*image_view];
-            let framebuffer_create_info = vk::FramebufferCreateInfo {
+            let framebuffer_ci = vk::FramebufferCreateInfo {
                 s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
                 p_next: ptr::null(),
                 flags: vk::FramebufferCreateFlags::empty(),
@@ -595,7 +611,7 @@ impl Renderer {
                 height: window_inner_size.height,
                 layers: 1, // Width, height and layers define dimensions.
             };
-            let framebuffer = unsafe{device.create_framebuffer(&framebuffer_create_info, None)}.unwrap();
+            let framebuffer = unsafe{device.create_framebuffer(&framebuffer_ci, None)}.unwrap();
             framebuffers.push(framebuffer);
         }
         // ________________________________________________________________________________________________________________
@@ -655,7 +671,7 @@ impl Renderer {
 
         let create_buffer = |size: u64, usage: vk::BufferUsageFlags, required_memory_flags: vk::MemoryPropertyFlags| 
         -> (vk::Buffer, vk::DeviceMemory, vk::DeviceSize) {
-            let buffer_create_info = vk::BufferCreateInfo {
+            let buffer_ci = vk::BufferCreateInfo {
                 s_type: vk::StructureType::BUFFER_CREATE_INFO,
                 p_next: ptr::null(),
                 flags: vk::BufferCreateFlags::empty(),
@@ -666,7 +682,7 @@ impl Renderer {
                 p_queue_family_indices: &graphics_queue_family_idx,
             };
 
-            let buffer = unsafe{device.create_buffer(&buffer_create_info, None)}.unwrap();
+            let buffer = unsafe{device.create_buffer(&buffer_ci, None)}.unwrap();
 
             let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
 
@@ -739,13 +755,105 @@ impl Renderer {
         
         
         // ________________________________________________________________________________________________________________
-
-        // DESCRIPTOR SET AND DESCRIPTOR LAYOUT: __________________________________________________________________________
         
+        // CREATE UNIFORM BUFFERS: ________________________________________________________________________________________
+        let mut uniform_buffers: Vec<vk::Buffer>  = Vec::with_capacity(frames_in_flight_count as usize);
+        let mut uniform_buffer_device_memories: Vec<vk::DeviceMemory>  = Vec::with_capacity(frames_in_flight_count as usize);
+        let mut uniform_buffer_mapped_memory_ptrs: Vec<*mut c_void> = Vec::with_capacity(frames_in_flight_count as usize);
+        for _ in 0..frames_in_flight_count {
+            let (uniform_buffer, uniform_buffer_device_memory, uniform_buffer_memory_size) = 
+                create_buffer(
+                    std::mem::size_of::<UniformBufferObject>() as u64,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+                );
+            uniform_buffers.push(uniform_buffer);
+            uniform_buffer_device_memories.push(uniform_buffer_device_memory);
+            // Get persistent mapped memory pointers, since I am going to use it every frame:
+            uniform_buffer_mapped_memory_ptrs.push(
+                unsafe{device.map_memory(uniform_buffer_device_memory, 0, uniform_buffer_memory_size, vk::MemoryMapFlags::empty())}.unwrap()
+            );
+        }
+        // ________________________________________________________________________________________________________________
+
+        // CREATE DESCRIPTOR LAYOUT:_______________________________________________________________________________________
+        let descriptor_set_layout_binding = vk::DescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER, // Uniform buffer is read-only/load only buffer.
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::VERTEX,
+            p_immutable_samplers: ptr::null(),
+        };
+        let descriptor_layout_ci = vk::DescriptorSetLayoutCreateInfo {
+            s_type: vk::StructureType::DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::DescriptorSetLayoutCreateFlags::empty(),
+            binding_count: 1,
+            p_bindings: &descriptor_set_layout_binding,
+        };
+        let descriptor_set_layout = unsafe{device.create_descriptor_set_layout(&descriptor_layout_ci, None)}.unwrap();
+        // ________________________________________________________________________________________________________________
+
+        // CREATE DESCRIPTOR POOL:_________________________________________________________________________________________
+        let descriptor_pool_size = vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: frames_in_flight_count,
+        };
+        let descriptor_pool_ci = vk::DescriptorPoolCreateInfo {
+            s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::DescriptorPoolCreateFlags::empty(),
+            max_sets: frames_in_flight_count,
+            pool_size_count: 1,
+            p_pool_sizes: &descriptor_pool_size,
+        };
+        let descriptor_pool = unsafe{device.create_descriptor_pool(&descriptor_pool_ci, None)}.unwrap();
+        // ________________________________________________________________________________________________________________
+
+        // ALLOCATE DESCRIPTOR SETS:_______________________________________________________________________________________
+        // vk::DescriptorSetAllocateInfo needs matching number of descriptorsetlayout elements for descriptionsets.
+        let mut descriptor_set_layout_vec: Vec<vk::DescriptorSetLayout> = Vec::with_capacity(frames_in_flight_count as usize);
+        for _ in 0..frames_in_flight_count {
+            descriptor_set_layout_vec.push(descriptor_set_layout);
+        }
+        let descriptor_set_alloc_info = vk::DescriptorSetAllocateInfo {
+            s_type: vk::StructureType::DESCRIPTOR_SET_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            descriptor_pool: descriptor_pool,
+            descriptor_set_count: frames_in_flight_count,
+            p_set_layouts: descriptor_set_layout_vec.as_ptr(),
+        };
+
+        let descriptor_sets = unsafe{device.allocate_descriptor_sets(&descriptor_set_alloc_info)}.unwrap();
+
+        println!("sizeof uniformbufferobject: {}", std::mem::size_of::<UniformBufferObject>());
+        // Update descriptor buffers:
+        for frame_idx in 0..frames_in_flight_count as usize {
+           let descriptor_buffer_info = vk::DescriptorBufferInfo {
+                buffer: uniform_buffers[frame_idx as usize],
+                offset: 0,
+                range: std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize//uniform_buffer_memory_sizes[frame_idx] as vk::DeviceSize,
+           };
+
+            let write_descriptor_set = vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: ptr::null(),
+                dst_set: descriptor_sets[frame_idx],
+                dst_binding: 0,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+                // Only one of the pointers used below depending on the descriptor_type parameter above:
+                p_image_info: ptr::null(),
+                p_buffer_info: &descriptor_buffer_info,
+                p_texel_buffer_view: ptr::null(),
+            };
+            unsafe{device.update_descriptor_sets(&[write_descriptor_set], &[])};
+        }
         // ________________________________________________________________________________________________________________
 
         // GRAPHICS PIPELINE: _____________________________________________________________________________________________
-        let vertex_input_state_create_info = vk::PipelineVertexInputStateCreateInfo {
+        let vertex_input_state_ci = vk::PipelineVertexInputStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineVertexInputStateCreateFlags::empty(),
@@ -755,14 +863,14 @@ impl Renderer {
             p_vertex_attribute_descriptions: vertex_input_attribute_descriptions.as_ptr()
         };
         // Primitives are assembled according to the InputAssemblyState. 
-        let input_assembly_state_create_info = vk::PipelineInputAssemblyStateCreateInfo {
+        let input_assembly_state_ci = vk::PipelineInputAssemblyStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineInputAssemblyStateCreateFlags::empty(),
             topology: vk::PrimitiveTopology::TRIANGLE_LIST,
             primitive_restart_enable: vk::FALSE // If you set the primitiveRestartEnable member to VK_TRUE, then it's possible to break up lines and triangles in the _STRIP topology modes by using a special index of 0xFFFF or 0xFFFFFFFF.
         };
-        let viewport_state_create_info = vk::PipelineViewportStateCreateInfo {
+        let viewport_state_ci = vk::PipelineViewportStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_VIEWPORT_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineViewportStateCreateFlags::empty(),
@@ -772,7 +880,7 @@ impl Renderer {
             p_scissors: ptr::null()
         };
 
-        let rasterization_state_create_info = vk::PipelineRasterizationStateCreateInfo {
+        let rasterization_state_ci = vk::PipelineRasterizationStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineRasterizationStateCreateFlags::empty(),
@@ -788,7 +896,7 @@ impl Renderer {
             depth_bias_slope_factor: 0.0f32,
             line_width: 1.0f32
         };
-        let multisample_state_create_info = vk::PipelineMultisampleStateCreateInfo {
+        let multisample_state_ci = vk::PipelineMultisampleStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineMultisampleStateCreateFlags::empty(),
@@ -812,7 +920,7 @@ impl Renderer {
             alpha_blend_op: vk::BlendOp::ADD,
             color_write_mask: vk::ColorComponentFlags::RGBA,
         }; 
-        let color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfo {
+        let color_blend_state_ci = vk::PipelineColorBlendStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineColorBlendStateCreateFlags::empty(),
@@ -823,53 +931,53 @@ impl Renderer {
             blend_constants: [0.0f32; 4] // is a pointer to an array of four values specifying the R, G, B, and A components of the blend constant color used in blending, depending on the blend factor. Blend constants are: vk::BlendFactor const values.
         };
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic_state_create_info = vk::PipelineDynamicStateCreateInfo {
+        let dynamic_state_ci = vk::PipelineDynamicStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_DYNAMIC_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineDynamicStateCreateFlags::empty(),
             dynamic_state_count: dynamic_states.len() as u32,
             p_dynamic_states: dynamic_states.as_ptr()
         };  
-        let pipeline_layout_create_info = vk::PipelineLayoutCreateInfo {
+        let pipeline_layout_ci = vk::PipelineLayoutCreateInfo {
             s_type: vk::StructureType::PIPELINE_LAYOUT_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineLayoutCreateFlags::empty(),
-            set_layout_count: 0,
-            p_set_layouts: ptr::null(),
+            set_layout_count: 1,
+            p_set_layouts: &descriptor_set_layout,
             push_constant_range_count: 0,
             p_push_constant_ranges: ptr::null(),
         };
-        let pipeline_layout = unsafe{device.create_pipeline_layout(&pipeline_layout_create_info, None)}.unwrap();
+        let pipeline_layout = unsafe{device.create_pipeline_layout(&pipeline_layout_ci, None)}.unwrap();
 
-        let graphics_pipeline_create_info = vk::GraphicsPipelineCreateInfo {
+        let graphics_pipeline_ci = vk::GraphicsPipelineCreateInfo {
             s_type: vk::StructureType::GRAPHICS_PIPELINE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineCreateFlags::empty(),
             stage_count: pipeline_shader_stages_ci.len() as u32,
             p_stages: pipeline_shader_stages_ci.as_ptr(),
-            p_vertex_input_state: &vertex_input_state_create_info,
-            p_input_assembly_state: &input_assembly_state_create_info,
+            p_vertex_input_state: &vertex_input_state_ci,
+            p_input_assembly_state: &input_assembly_state_ci,
             p_tessellation_state: ptr::null(),
-            p_viewport_state: &viewport_state_create_info,
-            p_rasterization_state: &rasterization_state_create_info,
-            p_multisample_state: &multisample_state_create_info,
+            p_viewport_state: &viewport_state_ci,
+            p_rasterization_state: &rasterization_state_ci,
+            p_multisample_state: &multisample_state_ci,
             p_depth_stencil_state: ptr::null(),
-            p_color_blend_state: &color_blend_state_create_info,
-            p_dynamic_state: &dynamic_state_create_info,
+            p_color_blend_state: &color_blend_state_ci,
+            p_dynamic_state: &dynamic_state_ci,
             layout: pipeline_layout,
             render_pass: render_pass,
             subpass: 0,
             base_pipeline_handle: vk::Pipeline::null(),
             base_pipeline_index: 0,
         };
-        let graphics_pipeline_create_infos = [graphics_pipeline_create_info];
+        let graphics_pipeline_create_infos = [graphics_pipeline_ci];
         let graphics_pipelines = unsafe{
             device.create_graphics_pipelines(vk::PipelineCache::null(), &graphics_pipeline_create_infos, None).unwrap()
         };
         //_________________________________________________________________________________________________________________
 
         // CREATE SEMAPHORE(S) AND FENCE(S)________________________________________________________________________________
-        let semaphore_create_info = vk::SemaphoreCreateInfo {
+        let semaphore_ci = vk::SemaphoreCreateInfo {
             s_type: vk::StructureType::SEMAPHORE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::SemaphoreCreateFlags::empty(),
@@ -877,30 +985,30 @@ impl Renderer {
         let mut image_available_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_image_count as usize);
         let mut render_finished_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_image_count as usize);
         for _ in 0..swapchain_image_count {
-            image_available_semaphores.push(unsafe{device.create_semaphore(&semaphore_create_info, None)}.unwrap());
-            render_finished_semaphores.push(unsafe{device.create_semaphore(&semaphore_create_info, None)}.unwrap());
+            image_available_semaphores.push(unsafe{device.create_semaphore(&semaphore_ci, None)}.unwrap());
+            render_finished_semaphores.push(unsafe{device.create_semaphore(&semaphore_ci, None)}.unwrap());
         }
 
-        let fence_create_info = vk::FenceCreateInfo {
+        let fence_ci = vk::FenceCreateInfo {
             s_type: vk::StructureType::FENCE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::FenceCreateFlags::SIGNALED
         };
         let mut queue_submit_finished_fences = Vec::<vk::Fence>::with_capacity(swapchain_image_count as usize);
         for _ in 0..swapchain_image_count {
-            queue_submit_finished_fences.push(unsafe{device.create_fence(&fence_create_info, None)}.unwrap());   
+            queue_submit_finished_fences.push(unsafe{device.create_fence(&fence_ci, None)}.unwrap());   
         }
         //_________________________________________________________________________________________________________________
 
 
         // COMMAND POOL:___________________________________________________________________________________________________
-        let command_pool_create_info = vk::CommandPoolCreateInfo {
+        let command_pool_ci = vk::CommandPoolCreateInfo {
             s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
             queue_family_index: graphics_queue_family_idx,
         };
-        let command_pool = unsafe{device.create_command_pool(&command_pool_create_info, None)}.unwrap();
+        let command_pool = unsafe{device.create_command_pool(&command_pool_ci, None)}.unwrap();
         //_________________________________________________________________________________________________________________
         
         // COMMAND BUFFER(S) ALLOCATION:___________________________________________________________________________________
@@ -915,13 +1023,13 @@ impl Renderer {
         //_________________________________________________________________________________________________________________
 
         // Transfer VERTICES/INDICES FROM STAGING BUFFER TO DEVICE_LOCAL BUFFER:___________________________________________________
-        let transfer_cmd_pool_create_info = vk::CommandPoolCreateInfo {
+        let transfer_cmd_pool_ci = vk::CommandPoolCreateInfo {
             s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::CommandPoolCreateFlags::TRANSIENT,
             queue_family_index: graphics_queue_family_idx, // GRAPHICS implicitly supports TRANSFER.
         };
-        let transfer_cmd_pool = unsafe{device.create_command_pool(&transfer_cmd_pool_create_info, None)}.unwrap();
+        let transfer_cmd_pool = unsafe{device.create_command_pool(&transfer_cmd_pool_ci, None)}.unwrap();
 
         let transfer_cmd_buffer_alloc_info = vk::CommandBufferAllocateInfo{
             s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
@@ -1016,7 +1124,16 @@ impl Renderer {
             vertex_buffer_device_memory,
             vertex_buffer_staging_device_memory,
             index_buffer_device_memory,
-            index_buffer_staging_device_memory
+            index_buffer_staging_device_memory,
+            descriptor_set_layout,
+
+            uniform_buffers,
+            uniform_buffer_device_memories,
+            uniform_buffer_mapped_memory_ptrs,
+            descriptor_pool,
+            descriptor_sets,
+
+            start_time: std::time::Instant::now()
         }
     }
     fn render_frame (&mut self, window_inner_size: &winit::dpi::PhysicalSize<u32>) {
@@ -1079,6 +1196,21 @@ impl Renderer {
                 height: window_inner_size.height,
             },
         };
+
+        // Update corresponding uniform buffer:
+        let time_since_start = std::time::Instant::now() - self.start_time;
+        let ubo = UniformBufferObject {
+            model: glam::Mat4::from_rotation_z(time_since_start.as_millis() as f32 / 1000.0f32),
+            view:  glam::Mat4::look_at_lh(glam::vec3(0.0, 1.5, -1.5), glam::vec3(0.0, 0.0, 0.0), glam::vec3(0.0, 1.0, 0.0)),     
+            projection: glam::Mat4::perspective_lh(3.1415f32 / 2.5f32, window_inner_size.width as f32 / window_inner_size.height as f32, 0.1, 100.0)
+        };
+        unsafe{
+        std::ptr::copy_nonoverlapping(
+            &ubo, 
+            (self.uniform_buffer_mapped_memory_ptrs[self.current_frame_in_flight_idx]) as *mut UniformBufferObject,
+            1
+        )};
+
         
         // COMMAND BUFFER RECORDING:
         unsafe {
@@ -1088,9 +1220,12 @@ impl Renderer {
             self.device.cmd_begin_render_pass(self.cmd_buffers[self.current_frame_in_flight_idx], &render_pass_begin_info, vk::SubpassContents::INLINE);
                 self.device.cmd_set_viewport(self.cmd_buffers[self.current_frame_in_flight_idx], 0, &[viewport]);
                 self.device.cmd_set_scissor(self.cmd_buffers[self.current_frame_in_flight_idx], 0, &[scissor]);
-                self.device.cmd_bind_pipeline(self.cmd_buffers[self.current_frame_in_flight_idx], vk::PipelineBindPoint::GRAPHICS, self.graphics_pipelines[0]);
+                self.device.cmd_bind_pipeline(self.cmd_buffers[self.current_frame_in_flight_idx], 
+                    vk::PipelineBindPoint::GRAPHICS, self.graphics_pipelines[0]);
                 self.device.cmd_bind_vertex_buffers(self.cmd_buffers[self.current_frame_in_flight_idx], 0, &[self.vertex_buffer], &[0]);
                 self.device.cmd_bind_index_buffer(self.cmd_buffers[self.current_frame_in_flight_idx], self.index_buffer, 0, vk::IndexType::UINT16);
+                self.device.cmd_bind_descriptor_sets(self.cmd_buffers[self.current_frame_in_flight_idx], 
+                    vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.descriptor_sets[self.current_frame_in_flight_idx]], &[]);
                 self.device.cmd_draw_indexed(self.cmd_buffers[self.current_frame_in_flight_idx], self.indices.len() as u32, 1, 0, 0, 0);
             self.device.cmd_end_render_pass(self.cmd_buffers[self.current_frame_in_flight_idx]);
         self.device.end_command_buffer(self.cmd_buffers[self.current_frame_in_flight_idx]).unwrap();
@@ -1145,7 +1280,7 @@ impl Renderer {
         }
         self.swapchain_image_views.clear();
 
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR {
+        let swapchain_ci = vk::SwapchainCreateInfoKHR {
             s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
             p_next: ptr::null(),
             flags: vk::SwapchainCreateFlagsKHR::empty(),
@@ -1166,7 +1301,7 @@ impl Renderer {
             old_swapchain: self.swapchain
         };
 
-        let new_swapchain = unsafe {self.swapchain_loader.create_swapchain(&swapchain_create_info, None)}.unwrap();
+        let new_swapchain = unsafe {self.swapchain_loader.create_swapchain(&swapchain_ci, None)}.unwrap();
         unsafe{self.swapchain_loader.destroy_swapchain(self.swapchain, None)}; // Need to destroy it after passing it to old_swapchain.
         println!("Swapchain is recreated with new window inner size: {:?}", window_new_inner_size);
         self.swapchain = new_swapchain;
@@ -1174,7 +1309,7 @@ impl Renderer {
         // Create swapchain image views:
         self.swapchain_images = unsafe{self.swapchain_loader.get_swapchain_images(self.swapchain)}.unwrap();
         for image in &self.swapchain_images {
-            let image_view_create_info = vk::ImageViewCreateInfo {
+            let image_view_ci = vk::ImageViewCreateInfo {
                 s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
                 p_next: ptr::null(),
                 flags: vk::ImageViewCreateFlags::empty(),
@@ -1195,14 +1330,14 @@ impl Renderer {
                     layer_count: 1,
                 }
             };
-            let image_view = unsafe{self.device.create_image_view(&image_view_create_info, None)}.unwrap();
+            let image_view = unsafe{self.device.create_image_view(&image_view_ci, None)}.unwrap();
             self.swapchain_image_views.push(image_view);
         }
 
         // Create Framebuffers:
         for image_view in &self.swapchain_image_views {
             let attachments = [*image_view];
-            let framebuffer_create_info = vk::FramebufferCreateInfo {
+            let framebuffer_ci = vk::FramebufferCreateInfo {
                 s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
                 p_next: ptr::null(),
                 flags: vk::FramebufferCreateFlags::empty(),
@@ -1213,7 +1348,7 @@ impl Renderer {
                 height: window_new_inner_size.height,
                 layers: 1, // Width, height and layers define dimensions.
             };
-            let framebuffer = unsafe{self.device.create_framebuffer(&framebuffer_create_info, None)}.unwrap();
+            let framebuffer = unsafe{self.device.create_framebuffer(&framebuffer_ci, None)}.unwrap();
             self.framebuffers.push(framebuffer);
         }
     }
@@ -1228,7 +1363,7 @@ impl Drop for Renderer {
     fn drop(&mut self) {
         unsafe{
         self.device.device_wait_idle().unwrap();
-        // Command buffers are automatically freed when corresponding Commandpools are destroyed.
+        // Command buffers are automatically freed when corresponding Command Pool is destroyed.
         self.device.destroy_command_pool(self.command_pool, None);
         for fence in &self.queue_submit_finished_fences {
             self.device.destroy_fence(*fence, None);
@@ -1242,15 +1377,24 @@ impl Drop for Renderer {
         for pipeline in &self.graphics_pipelines {
             self.device.destroy_pipeline(*pipeline, None);
         }
+        // Descriptor sets are automatically freed when corresponding Descriptor Pool is destroyed.
+        self.device.destroy_descriptor_pool(self.descriptor_pool, None);
+        self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
         self.device.destroy_pipeline_layout(self.pipeline_layout, None);
         self.device.destroy_buffer(self.vertex_buffer, None);
         self.device.destroy_buffer(self.vertex_buffer_staging, None);
         self.device.destroy_buffer(self.index_buffer, None);
         self.device.destroy_buffer(self.index_buffer_staging, None);
+        for buffer in &self.uniform_buffers {
+            self.device.destroy_buffer(*buffer, None);
+        }
         self.device.free_memory(self.vertex_buffer_device_memory, None);
         self.device.free_memory(self.vertex_buffer_staging_device_memory, None);
         self.device.free_memory(self.index_buffer_device_memory, None);
         self.device.free_memory(self.index_buffer_staging_device_memory, None);
+        for memory in &self.uniform_buffer_device_memories {
+            self.device.free_memory(*memory, None);
+        }
         for framebuffer in &self.framebuffers {
             self.device.destroy_framebuffer(*framebuffer, None);
         }
@@ -1282,6 +1426,7 @@ fn main() {
     event_loop.run(move |event, _, control_flow| {
         // Need to check this because when window is minimized,  WindowEvent::Resized is fired with (height: 0, width: 0).
         if !(window.inner_size().height > 0 && window.inner_size().width > 0) { return;}
+        window.request_redraw();
         match event {
             Event::WindowEvent { window_id, event } if window_id == window.id() => match event {
                 WindowEvent::CloseRequested => {
@@ -1315,7 +1460,7 @@ fn main() {
                 renderer.render_frame(&window.inner_size());
             },
             _ => {
-                *control_flow = ControlFlow::Wait;
+                *control_flow = ControlFlow::Poll;
             }
         }
     });

@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 ash = "0.37.2"
 winit = "0.28.2"
+glam = "0.23.0"
