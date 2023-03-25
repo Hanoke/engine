@@ -1,5 +1,5 @@
 [package]
-name = "engine"
+name = "hanokei"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,3 +9,10 @@ edition = "2021"
 ash = "0.37.2"
 winit = "0.28.2"
 glam = "0.23.0"
+
+[lib]
+path = "src/lib/lib.rs"
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
