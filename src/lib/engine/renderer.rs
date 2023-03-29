@@ -240,9 +240,11 @@ fn get_pre_transform_and_composite_alpha(surface_loader: &extensions::khr::Surfa
 
 type IndexBufferElementType = u16;
 #[allow(dead_code)]
+#[repr(C)] // C representation needed, otherwise Rust makes uv field come before color field in memory, which Vulkan does not expect.
 pub struct Vertex {
     pos: [f32; 2],
-    color: [f32; 3]
+    color: [f32; 3],
+    uv: [f32; 2]
 }
 
 #[repr(C)]
@@ -314,6 +316,11 @@ pub struct Renderer {
     pub uniform_buffer_mapped_memory_ptrs: Vec<*mut c_void>,
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
+
+    texture_image: vk::Image,
+    texture_image_device_memory: vk::DeviceMemory,
+    texture_image_view: vk::ImageView,
+    texture_sampler: vk::Sampler,
 
     pub start_time: std::time::Instant
 }
@@ -550,19 +557,23 @@ impl Renderer {
         let vertices = vec![
             Vertex{
                 pos:   [-0.9, -0.9],
-                color: [1.0, 0.0, 0.0]
+                color: [1.0, 0.0, 0.0],
+                uv:    [1.0, 0.0]
             },
             Vertex{
                 pos:   [-0.9, 0.9],
-                color: [0.0, 1.0, 0.0]
+                color: [0.0, 1.0, 0.0],
+                uv:    [0.0, 0.0]
             },
             Vertex{
                 pos:   [0.9, 0.9],
-                color: [0.0, 0.0, 1.0]
+                color: [0.0, 0.0, 1.0],
+                uv:    [0.0, 1.0]
             },
             Vertex{
                 pos:   [0.9, -0.9],
-                color: [1.0, 1.0, 1.0]
+                color: [1.0, 1.0, 1.0],
+                uv:    [1.0, 1.0]
             }];
         let indices: Vec<IndexBufferElementType> = vec![0, 1, 2, 0, 2, 3];
 
@@ -584,8 +595,17 @@ impl Renderer {
             format: vk::Format::R32G32B32_SFLOAT,
             offset: std::mem::size_of_val(&vertices[0].pos) as u32
         };
+        let vertex_input_attribute_desc3 = vk::VertexInputAttributeDescription{
+            location: 2,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: (std::mem::size_of_val(&vertices[0].pos) + std::mem::size_of_val(&vertices[0].color)) as u32
+        };
 
-        let vertex_input_attribute_descriptions = [vertex_input_attribute_desc1, vertex_input_attribute_desc2];
+        println!("Size of Vertex: {}", std::mem::size_of::<Vertex>());
+
+        let vertex_input_attribute_descriptions = 
+            [vertex_input_attribute_desc1, vertex_input_attribute_desc2, vertex_input_attribute_desc3];
         // ________________________________________________________________________________________________________________
 
         // CREATE VERTICES BUFFER AND ALLOCATE IT:_________________________________________________________________________,
@@ -635,7 +655,7 @@ impl Renderer {
                 s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
                 p_next: ptr::null(),
                 // Note: Actual VRAM size might be different from RAM memory, cuz of alignments(I guess).
-                allocation_size: buffer_memory_requirements.size as u64,
+                allocation_size: buffer_memory_requirements.size,
                 memory_type_index: memory_type_idx as u32,
             };
             let buffer_device_memory = unsafe{device.allocate_memory(&buffer_mem_alloc_info, None)}.unwrap();
@@ -661,7 +681,7 @@ impl Renderer {
         // Copy actual RAM to VRAM by direct mapping:
         unsafe {
         let data_ptr = device.map_memory(vertex_buffer_staging_device_memory, 0, vertex_buffer_staging_memory_size, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(vertices.as_ptr() as *const c_void, data_ptr, vertex_buffer_staging_memory_size as usize);
+            std::ptr::copy_nonoverlapping(vertices.as_ptr(), data_ptr as *mut Vertex, vertices.len());
         device.unmap_memory(vertex_buffer_staging_device_memory);
         }
 
@@ -679,11 +699,9 @@ impl Renderer {
             );
         unsafe {
         let data_ptr = device.map_memory(index_buffer_staging_device_memory, 0, index_buffer_staging_memory_size, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(indices.as_ptr() as *const c_void, data_ptr, index_buffer_staging_memory_size as usize);
+            std::ptr::copy_nonoverlapping(indices.as_ptr(), data_ptr as *mut IndexBufferElementType, indices.len());
         device.unmap_memory(index_buffer_staging_device_memory);
         }
-        
-        
         // ________________________________________________________________________________________________________________
         
         // CREATE UNIFORM BUFFERS: ________________________________________________________________________________________
@@ -706,20 +724,269 @@ impl Renderer {
         }
         // ________________________________________________________________________________________________________________
 
+        // LOAD IMAGE______________________________________________________________________________________________________
+        let image_reader = image::io::Reader::open("./images/texture.jpg").unwrap();
+        let image_buffer = image_reader.decode().unwrap().into_rgba8();
+        let image_bytes: Vec<u8> = image_buffer.bytes().map(|byte| {byte.unwrap()}).collect();
+
+        let (texture_image_staging_buffer, texture_image_staging_buffer_device_memory, image_staging_buffer_device_memory_size) =
+            create_buffer(image_bytes.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, 
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
+
+        println!("image_staging_buffer_device_memory_size: {}, img_bytes.len(): {}",
+             image_staging_buffer_device_memory_size, image_bytes.len());
+        // Info: "Each resource may need more memory than the requested size of a resource. It's because drivers may need 
+        // some additional meta-data to manage given resource. That's why we need to call vkGet...MemoryRequirements() 
+        // functions and allocate enough memory.But when we want to modify contents of a buffer or image we need to think 
+        // only about its size (the size we requested during resource creation), not the data size returned by the mentioned 
+        // functions."
+        unsafe{
+        let data_ptr = device.map_memory(texture_image_staging_buffer_device_memory, 0, image_staging_buffer_device_memory_size, vk::MemoryMapFlags::empty()).unwrap();
+            std::ptr::copy_nonoverlapping(image_bytes.as_ptr(), data_ptr as *mut u8, image_bytes.len());
+        device.unmap_memory(texture_image_staging_buffer_device_memory);
+        }
+
+        // Create Image:
+        let texture_image_ci = vk::ImageCreateInfo {
+            s_type: vk::StructureType::IMAGE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::ImageCreateFlags::empty(),
+            image_type: vk::ImageType::TYPE_2D,
+            format: vk::Format::R8G8B8A8_SRGB,
+            extent: vk::Extent3D{
+                width: image_buffer.width(),
+                height: image_buffer.height(),
+                depth: 1
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            samples: vk::SampleCountFlags::TYPE_1,
+            // We do not access this image directly from CPU, so it does not need to be LINEAR tiling.
+            // If a direct mapping from CPU is needed, you could have used LINEAR tiling so, RAM and VRAM does not differ in layout. 
+            tiling: vk::ImageTiling::OPTIMAL, 
+            usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            queue_family_index_count: 0,
+            p_queue_family_indices: ptr::null(), // Ignored if image sharing is not CONCURRENT.
+            initial_layout: vk::ImageLayout::UNDEFINED,
+        };
+        let texture_image = unsafe{device.create_image(&texture_image_ci, None).unwrap()};
+        
+        
+        let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
+
+        let required_memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        let mut memory_type_idx = 0;
+        let texture_image_memory_requirements = unsafe{device.get_image_memory_requirements(texture_image)};
+        println!("Image supported memory type bits: {:b}", texture_image_memory_requirements.memory_type_bits);
+        for (idx, physical_device_memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
+            if physical_device_memory_type.property_flags.contains(required_memory_flags) &&
+            ((1 << idx) & texture_image_memory_requirements.memory_type_bits) == (1 << idx) {
+                memory_type_idx = idx;
+                break;
+            }
+        }
+        println!("Texture Image Allocation: found memory_type_idx: {}", memory_type_idx);
+        
+        let texture_image_mem_alloc_info = vk::MemoryAllocateInfo {
+            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            allocation_size: texture_image_memory_requirements.size,
+            memory_type_index: memory_type_idx as u32,
+        };
+        let texture_image_device_memory = unsafe{device.allocate_memory(&texture_image_mem_alloc_info, None)}.unwrap();
+        unsafe{device.bind_image_memory(texture_image, texture_image_device_memory, 0)}.unwrap();
+
+        let transition_image_layout = |cmd_buffer: vk::CommandBuffer, transition_image: vk::Image, 
+            old_layout: vk::ImageLayout, new_layout: vk::ImageLayout,
+            src_access_mask: vk::AccessFlags, dst_access_mask: vk::AccessFlags,
+            src_stage_mask: vk::PipelineStageFlags, dst_stage_mask: vk::PipelineStageFlags| {
+            let image_subresource_range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            let image_memory_barrier = vk::ImageMemoryBarrier{
+                s_type: vk::StructureType::IMAGE_MEMORY_BARRIER,
+                p_next: ptr::null(),
+                src_access_mask: src_access_mask,
+                dst_access_mask: dst_access_mask,
+                old_layout: old_layout,
+                new_layout: new_layout,
+                src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                image: transition_image,
+                subresource_range: image_subresource_range,
+            };
+            unsafe{device.cmd_pipeline_barrier(cmd_buffer,
+                src_stage_mask,
+                dst_stage_mask,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[image_memory_barrier]
+            )};
+        };
+
+        let single_time_cmd_buffer_start = || -> (vk::CommandBuffer, vk::CommandPool){
+            let cmd_pool_ci = vk::CommandPoolCreateInfo {
+                s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
+                p_next: ptr::null(),
+                flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                queue_family_index: graphics_queue_family_idx, // GRAPHICS implicitly supports TRANSFER.
+            };
+            let cmd_pool = unsafe{device.create_command_pool(&cmd_pool_ci, None)}.unwrap();
+            
+            let cmd_buffer_alloc_info = vk::CommandBufferAllocateInfo{
+                s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
+                p_next: ptr::null(),
+                command_pool: cmd_pool,
+                level: vk::CommandBufferLevel::PRIMARY,
+                command_buffer_count: 1,
+            };
+            let cmd_buffer = unsafe{device.allocate_command_buffers(&cmd_buffer_alloc_info)}.unwrap()[0];
+            
+            let cmd_buffer_begin_info = vk::CommandBufferBeginInfo {
+                s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
+                p_next: ptr::null(),
+                flags: vk::CommandBufferUsageFlags::empty(),
+                p_inheritance_info: ptr::null(),
+            };
+            unsafe{device.begin_command_buffer(cmd_buffer, &cmd_buffer_begin_info).unwrap()};
+            
+            (cmd_buffer, cmd_pool)
+        };
+        let single_time_cmd_buffer_end = |cmd_buffer: vk::CommandBuffer, cmd_pool: vk::CommandPool| {
+            unsafe{
+            device.end_command_buffer(cmd_buffer).unwrap();
+            }
+            let submit_info = vk::SubmitInfo {
+                s_type: vk::StructureType::SUBMIT_INFO,
+                p_next: ptr::null(),
+                wait_semaphore_count: 0,
+                p_wait_semaphores: ptr::null(),
+                p_wait_dst_stage_mask: ptr::null(),
+                command_buffer_count: 1,
+                p_command_buffers: &cmd_buffer,
+                signal_semaphore_count: 0,
+                p_signal_semaphores: ptr::null(),
+            };
+            unsafe{device.queue_submit(graphics_queue, &[submit_info], vk::Fence::null()).unwrap()};
+            
+            // Wait idle before destroying to let it be done with its job.
+            unsafe{device.queue_wait_idle(graphics_queue).unwrap()};
+            unsafe{device.destroy_command_pool(cmd_pool, None)};
+        };
+
+        let (single_time_cmd_buffer, single_time_cmd_pool) = single_time_cmd_buffer_start();
+        // Copying from a buffer to image requires to change IMAGELAYOUT. So, first I need to set the layout by using memory barriers:
+        transition_image_layout(single_time_cmd_buffer, texture_image, 
+            vk::ImageLayout::UNDEFINED,          vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            vk::AccessFlags::NONE,               vk::AccessFlags::TRANSFER_WRITE,
+            vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER);
+        {
+            // At that point, the image layout will be "TRANSFER_DST_OPTIMAL", so we can just do a copy operation:
+            let buffer_image_copy = vk::BufferImageCopy{
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: vk::Offset3D {
+                    ..Default::default()
+                },
+                image_extent: vk::Extent3D {
+                    width: image_buffer.width(),
+                    height: image_buffer.height(),
+                    depth: 1
+                },
+            };
+            unsafe{device.cmd_copy_buffer_to_image(single_time_cmd_buffer, texture_image_staging_buffer, texture_image, 
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[buffer_image_copy])};
+        }
+        // After doing the copy, we need to prepare the image layout for shader reads by setting it to "IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL":
+        transition_image_layout(single_time_cmd_buffer, texture_image, 
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::AccessFlags::TRANSFER_WRITE,       vk::AccessFlags::SHADER_READ,
+            vk::PipelineStageFlags::TRANSFER,      vk::PipelineStageFlags::FRAGMENT_SHADER);
+        single_time_cmd_buffer_end(single_time_cmd_buffer, single_time_cmd_pool);
+
+        unsafe{device.destroy_buffer(texture_image_staging_buffer, None)};
+        unsafe{device.free_memory(texture_image_staging_buffer_device_memory, None)};
+
+        // Create texture image view:
+        let texture_image_view_ci = vk::ImageViewCreateInfo {
+            s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::ImageViewCreateFlags::empty(),
+            image: texture_image,
+            view_type: vk::ImageViewType::TYPE_2D,
+            format: vk::Format::R8G8B8A8_SRGB,
+            components: vk::ComponentMapping::default(),
+            subresource_range: vk::ImageSubresourceRange{
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer:0,
+                layer_count: 1,
+            },
+        };
+        let texture_image_view = unsafe{device.create_image_view(&texture_image_view_ci, None)}.unwrap();
+
+        // Create Texture Sampler:
+        let physical_device_properties = unsafe{instance.get_physical_device_properties(physical_device)};
+        let texture_sampler_ci = vk::SamplerCreateInfo {
+            s_type: vk::StructureType::SAMPLER_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::SamplerCreateFlags::empty(),
+            mag_filter: vk::Filter::LINEAR,
+            min_filter: vk::Filter::LINEAR,
+            mipmap_mode: vk::SamplerMipmapMode::LINEAR,
+            address_mode_u: vk::SamplerAddressMode::REPEAT,
+            address_mode_v: vk::SamplerAddressMode::REPEAT,
+            address_mode_w: vk::SamplerAddressMode::REPEAT,
+            mip_lod_bias: 0.0f32,
+            anisotropy_enable: vk::TRUE,
+            max_anisotropy: physical_device_properties.limits.max_sampler_anisotropy, // 16 for me.
+            compare_enable: vk::FALSE,
+            compare_op: vk::CompareOp::ALWAYS,
+            min_lod: 0.0f32,
+            max_lod: 0.0f32,
+            border_color: vk::BorderColor::INT_OPAQUE_BLACK,
+            unnormalized_coordinates: vk::FALSE,
+        };
+        let texture_image_sampler = unsafe{device.create_sampler(&texture_sampler_ci, None)}.unwrap();
+        //_________________________________________________________________________________________________________________
+
         // CREATE DESCRIPTOR LAYOUT:_______________________________________________________________________________________
-        let descriptor_set_layout_binding = vk::DescriptorSetLayoutBinding {
+        let ub_descriptor_set_layout_binding = vk::DescriptorSetLayoutBinding {
             binding: 0,
             descriptor_type: vk::DescriptorType::UNIFORM_BUFFER, // Uniform buffer is read-only/load only buffer.
             descriptor_count: 1,
             stage_flags: vk::ShaderStageFlags::VERTEX,
             p_immutable_samplers: ptr::null(),
+        };  
+        let sampler_descriptor_set_layout_binding2 = vk::DescriptorSetLayoutBinding {
+            binding: 1,
+            // COMBINED_IMAGE_SAMPLER combines image and sampler in a single descriptor.
+            descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: 1,
+            stage_flags: vk::ShaderStageFlags::FRAGMENT,
+            p_immutable_samplers: ptr::null(),
         };
+        let bindings = [ub_descriptor_set_layout_binding, sampler_descriptor_set_layout_binding2];
         let descriptor_layout_ci = vk::DescriptorSetLayoutCreateInfo {
             s_type: vk::StructureType::DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::DescriptorSetLayoutCreateFlags::empty(),
-            binding_count: 1,
-            p_bindings: &descriptor_set_layout_binding,
+            binding_count: bindings.len() as u32,
+            p_bindings: bindings.as_ptr(),
         };
         let descriptor_set_layout = unsafe{device.create_descriptor_set_layout(&descriptor_layout_ci, None)}.unwrap();
         // ________________________________________________________________________________________________________________
@@ -729,13 +996,18 @@ impl Renderer {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
             descriptor_count: frames_in_flight_count,
         };
+        let descriptor_pool_size2 = vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: frames_in_flight_count,
+        };
+        let descriptor_pool_sizes = [descriptor_pool_size,descriptor_pool_size2];
         let descriptor_pool_ci = vk::DescriptorPoolCreateInfo {
             s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::DescriptorPoolCreateFlags::empty(),
             max_sets: frames_in_flight_count,
-            pool_size_count: 1,
-            p_pool_sizes: &descriptor_pool_size,
+            pool_size_count: descriptor_pool_sizes.len() as u32,
+            p_pool_sizes: descriptor_pool_sizes.as_ptr(),
         };
         let descriptor_pool = unsafe{device.create_descriptor_pool(&descriptor_pool_ci, None)}.unwrap();
         // ________________________________________________________________________________________________________________
@@ -753,16 +1025,20 @@ impl Renderer {
             descriptor_set_count: frames_in_flight_count,
             p_set_layouts: descriptor_set_layout_vec.as_ptr(),
         };
-
         let descriptor_sets = unsafe{device.allocate_descriptor_sets(&descriptor_set_alloc_info)}.unwrap();
 
         println!("sizeof uniformbufferobject: {}", std::mem::size_of::<UniformBufferObject>());
         // Update descriptor buffers:
         for frame_idx in 0..frames_in_flight_count as usize {
            let descriptor_buffer_info = vk::DescriptorBufferInfo {
-                buffer: uniform_buffers[frame_idx as usize],
+                buffer: uniform_buffers[frame_idx],
                 offset: 0,
                 range: std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize//uniform_buffer_memory_sizes[frame_idx] as vk::DeviceSize,
+           };
+           let descriptor_image_info = vk::DescriptorImageInfo {
+                sampler: texture_image_sampler,
+                image_view: texture_image_view,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
            };
 
             let write_descriptor_set = vk::WriteDescriptorSet {
@@ -778,7 +1054,20 @@ impl Renderer {
                 p_buffer_info: &descriptor_buffer_info,
                 p_texel_buffer_view: ptr::null(),
             };
-            unsafe{device.update_descriptor_sets(&[write_descriptor_set], &[])};
+            let write_descriptor_set2 = vk::WriteDescriptorSet {
+                s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
+                p_next: ptr::null(),
+                dst_set: descriptor_sets[frame_idx],
+                dst_binding: 1,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                // Only one of the pointers used below depending on the descriptor_type parameter above:
+                p_image_info: &descriptor_image_info,
+                p_buffer_info: ptr::null(),
+                p_texel_buffer_view: ptr::null(),
+            };
+            unsafe{device.update_descriptor_sets(&[write_descriptor_set, write_descriptor_set2], &[])};
         }
         // ________________________________________________________________________________________________________________
 
@@ -912,8 +1201,8 @@ impl Renderer {
             p_next: ptr::null(),
             flags: vk::SemaphoreCreateFlags::empty(),
         };
-        let mut image_available_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_image_count as usize);
-        let mut render_finished_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_image_count as usize);
+        let mut image_available_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_image_count);
+        let mut render_finished_semaphores = Vec::<vk::Semaphore>::with_capacity(swapchain_image_count);
         for _ in 0..swapchain_image_count {
             image_available_semaphores.push(unsafe{device.create_semaphore(&semaphore_ci, None)}.unwrap());
             render_finished_semaphores.push(unsafe{device.create_semaphore(&semaphore_ci, None)}.unwrap());
@@ -924,7 +1213,7 @@ impl Renderer {
             p_next: ptr::null(),
             flags: vk::FenceCreateFlags::SIGNALED
         };
-        let mut queue_submit_finished_fences = Vec::<vk::Fence>::with_capacity(swapchain_image_count as usize);
+        let mut queue_submit_finished_fences = Vec::<vk::Fence>::with_capacity(swapchain_image_count);
         for _ in 0..swapchain_image_count {
             queue_submit_finished_fences.push(unsafe{device.create_fence(&fence_ci, None)}.unwrap());   
         }
@@ -953,64 +1242,20 @@ impl Renderer {
         //_________________________________________________________________________________________________________________
 
         // Transfer VERTICES/INDICES FROM STAGING BUFFER TO DEVICE_LOCAL BUFFER:___________________________________________________
-        let transfer_cmd_pool_ci = vk::CommandPoolCreateInfo {
-            s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::CommandPoolCreateFlags::TRANSIENT,
-            queue_family_index: graphics_queue_family_idx, // GRAPHICS implicitly supports TRANSFER.
+        let (single_time_cmd_buffer, single_time_cmd_pool) = single_time_cmd_buffer_start();
+        let vertices_copy_region = vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: vertex_buffer_staging_memory_size,
         };
-        let transfer_cmd_pool = unsafe{device.create_command_pool(&transfer_cmd_pool_ci, None)}.unwrap();
-
-        let transfer_cmd_buffer_alloc_info = vk::CommandBufferAllocateInfo{
-            s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            command_pool: transfer_cmd_pool,
-            level: vk::CommandBufferLevel::PRIMARY,
-            command_buffer_count: 1,
+        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, vertex_buffer_staging, vertex_buffer, &[vertices_copy_region])};
+        let indices_copy_region = vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: index_buffer_staging_memory_size,
         };
-        let transfer_cmd_buffer = unsafe{device.allocate_command_buffers(&transfer_cmd_buffer_alloc_info)}.unwrap()[0];
-        let transfer_cmd_buffer_begin_info = vk::CommandBufferBeginInfo {
-            s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
-            p_next: ptr::null(),
-            flags: vk::CommandBufferUsageFlags::empty(),
-            p_inheritance_info: ptr::null(),
-        };
-        unsafe{
-        device.begin_command_buffer(transfer_cmd_buffer, &transfer_cmd_buffer_begin_info).unwrap();
-            let vertices_copy_region = vk::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size: vertex_buffer_staging_memory_size,
-            };
-            device.cmd_copy_buffer(transfer_cmd_buffer, vertex_buffer_staging, vertex_buffer, &[vertices_copy_region]);
-
-            let indices_copy_region = vk::BufferCopy {
-                src_offset: 0,
-                dst_offset: 0,
-                size: index_buffer_staging_memory_size,
-            };
-            device.cmd_copy_buffer(transfer_cmd_buffer, index_buffer_staging, index_buffer, &[indices_copy_region]);
-        device.end_command_buffer(transfer_cmd_buffer).unwrap();
-        
-        let submit_info = vk::SubmitInfo {
-            s_type: vk::StructureType::SUBMIT_INFO,
-            p_next: ptr::null(),
-            wait_semaphore_count: 0,
-            p_wait_semaphores: ptr::null(),
-            p_wait_dst_stage_mask: ptr::null(),
-            command_buffer_count: 1,
-            p_command_buffers: &transfer_cmd_buffer,
-            signal_semaphore_count: 0,
-            p_signal_semaphores: ptr::null(),
-        };
-        device.queue_submit(graphics_queue, &[submit_info], vk::Fence::null()).unwrap();
-        println!("Copied vertices from Staging buffer into Device local buffer.");
-        
-        // Wait for the queue to end its job before destroying it.
-        device.queue_wait_idle(graphics_queue).unwrap(); 
-        // Cmdbuffers created from the pool is automatically freed when destroyed the command pool.
-        device.destroy_command_pool(transfer_cmd_pool, None); 
-        }
+        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, index_buffer_staging, index_buffer, &[indices_copy_region])};
+        single_time_cmd_buffer_end(single_time_cmd_buffer, single_time_cmd_pool);
         //_________________________________________________________________________________________________________________
 
         Renderer {
@@ -1062,6 +1307,11 @@ impl Renderer {
             uniform_buffer_mapped_memory_ptrs,
             descriptor_pool,
             descriptor_sets,
+            
+            texture_image,
+            texture_image_device_memory,
+            texture_image_view,
+            texture_sampler: texture_image_sampler,
 
             start_time: std::time::Instant::now()
         }
@@ -1132,7 +1382,7 @@ impl Renderer {
         let ubo = UniformBufferObject {
             model: glam::Mat4::from_rotation_z(time_since_start.as_millis() as f32 / 1000.0f32),
             view:  glam::Mat4::look_at_lh(glam::vec3(0.0, 1.5, -1.5), glam::vec3(0.0, 0.0, 0.0), glam::vec3(0.0, 1.0, 0.0)),     
-            projection: glam::Mat4::perspective_lh(3.1415f32 / 2.5f32, window_inner_size.width as f32 / window_inner_size.height as f32, 0.1, 100.0)
+            projection: glam::Mat4::perspective_lh(std::f32::consts::PI / 2.5f32, window_inner_size.width as f32 / window_inner_size.height as f32, 0.1, 100.0)
         };
         unsafe{
         std::ptr::copy_nonoverlapping(
@@ -1222,7 +1472,7 @@ impl Renderer {
             pp_enabled_layer_names: ptr::null(), // Device-only layers are deprecated.
             enabled_extension_count: device_ext_names.len() as u32,
             pp_enabled_extension_names: device_ext_names.as_ptr(),
-            p_enabled_features: &vk::PhysicalDeviceFeatures::default()
+            p_enabled_features: &vk::PhysicalDeviceFeatures::builder().sampler_anisotropy(true).build()
         };
     
         unsafe{instance.create_device(physical_device, &device_create_info, None).unwrap()}
@@ -1380,10 +1630,12 @@ impl Drop for Renderer {
         for buffer in &self.uniform_buffers {
             self.device.destroy_buffer(*buffer, None);
         }
+        self.device.destroy_image(self.texture_image, None);
         self.device.free_memory(self.vertex_buffer_device_memory, None);
         self.device.free_memory(self.vertex_buffer_staging_device_memory, None);
         self.device.free_memory(self.index_buffer_device_memory, None);
         self.device.free_memory(self.index_buffer_staging_device_memory, None);
+        self.device.free_memory(self.texture_image_device_memory, None);
         for memory in &self.uniform_buffer_device_memories {
             self.device.free_memory(*memory, None);
         }
@@ -1396,6 +1648,8 @@ impl Drop for Renderer {
         for image_view in &self.swapchain_image_views {
             self.device.destroy_image_view(*image_view, None);
         }
+        self.device.destroy_sampler(self.texture_sampler, None);
+        self.device.destroy_image_view(self.texture_image_view, None);
         // Swapchain images are automatically destroyed when swapchain is destroyed.     
         self.swapchain_loader.destroy_swapchain(self.swapchain, None);
         self.surface_loader.destroy_surface(self.surface, None);

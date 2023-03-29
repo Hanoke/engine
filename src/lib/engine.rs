@@ -48,7 +48,6 @@ impl Engine {
                     event::WindowEvent::Resized(new_inner_size) => {
                         if is_first_resized_event {
                             is_first_resized_event = false;
-                            return;
                         } else {
                             // println!("Event::WindowEvent::Resized: {new_inner_size:?}");
                             self.renderer.window_resized(new_inner_size);
