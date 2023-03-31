@@ -109,8 +109,8 @@ fn get_debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoE
         p_next: ptr::null(),
         flags: vk::DebugUtilsMessengerCreateFlagsEXT::empty(),
         message_severity:   vk::DebugUtilsMessageSeverityFlagsEXT::WARNING | 
-                            // vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE |
-                            // vk::DebugUtilsMessageSeverityFlagsEXT::INFO |
+                            //vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE |
+                            //vk::DebugUtilsMessageSeverityFlagsEXT::INFO |
                             vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
         message_type:   vk::DebugUtilsMessageTypeFlagsEXT::GENERAL |
                         vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE |
@@ -123,10 +123,8 @@ fn get_debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoE
 /// This function will be called back by debug_utils_messenger.
 /// Debug_utils_messenger_create_info is passed to instance_create_info's pNext to be created.
 unsafe extern "system" fn debug_utils_callback (
-                            message_severity: vk::DebugUtilsMessageSeverityFlagsEXT, 
-                            message_types: vk::DebugUtilsMessageTypeFlagsEXT,
-                            p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
-                            _p_user_data: *mut c_void) -> Bool32 {
+message_severity: vk::DebugUtilsMessageSeverityFlagsEXT, message_types: vk::DebugUtilsMessageTypeFlagsEXT,
+p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT, _p_user_data: *mut c_void) -> Bool32 {
     let severity_str = match message_severity {
         vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => {"[ERROR]"},
         vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => {"[WARNING]"},
@@ -141,6 +139,7 @@ unsafe extern "system" fn debug_utils_callback (
         vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING => {"[DEVICE_ADDRESS_BINDING]"},
         _ => {"[UNKNOWN TYPE]"}
     };
+
     let msg_str = CStr::from_ptr((*p_callback_data).p_message).to_str().unwrap();
     println!("{}{}:{}", severity_str, type_str, msg_str);
 
@@ -158,7 +157,7 @@ fn get_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
 /// This is the **index** of graphics queue family inside the array returned from vkGetPhysicalDeviceQueueFamilyProperties.
 /// GRAPHICS QUEUE always can do TRANSFER operations, even if it does not say the GRAPHICS QUEUE has TRANSFER_BIT.
 fn get_graphics_queue_family_idx(instance: &ash::Instance, physical_device: vk::PhysicalDevice, 
-        surface_loader: &extensions::khr::Surface, surface: &vk::SurfaceKHR) -> u32 {
+surface_loader: &extensions::khr::Surface, surface: &vk::SurfaceKHR) -> u32 {
     let available_queue_family_props = 
         unsafe{instance.get_physical_device_queue_family_properties(physical_device)};
 
@@ -184,7 +183,7 @@ fn get_graphics_queue_family_idx(instance: &ash::Instance, physical_device: vk::
 
 
 fn get_surface_format_and_color_space(surface_loader: &extensions::khr::Surface, physical_device: vk::PhysicalDevice, 
-    surface: vk::SurfaceKHR) -> (vk::Format, vk::ColorSpaceKHR) {
+surface: vk::SurfaceKHR) -> (vk::Format, vk::ColorSpaceKHR) {
     let wanted_format = vk::Format::B8G8R8A8_SRGB;
     let wanted_color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
 
@@ -202,7 +201,7 @@ fn get_surface_format_and_color_space(surface_loader: &extensions::khr::Surface,
 }
 
 fn get_present_mode(surface_loader: &extensions::khr::Surface, physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR) 
-    -> vk::PresentModeKHR {
+-> vk::PresentModeKHR {
     let wanted_present_mode = vk::PresentModeKHR::IMMEDIATE;
 
     let surface_present_modes =
@@ -217,7 +216,7 @@ fn get_present_mode(surface_loader: &extensions::khr::Surface, physical_device: 
 }
 
 fn get_swapchain_min_image_count(wanted_image_count: u32, surface_loader: &extensions::khr::Surface, 
-    physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR, ) -> u32 {
+physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR, ) -> u32 {
     let capabilities = 
         unsafe{surface_loader.get_physical_device_surface_capabilities(physical_device, surface)}.unwrap();
     if wanted_image_count >= capabilities.min_image_count && wanted_image_count <= capabilities.max_image_count {
@@ -228,8 +227,8 @@ fn get_swapchain_min_image_count(wanted_image_count: u32, surface_loader: &exten
 }
 
 fn get_pre_transform_and_composite_alpha(surface_loader: &extensions::khr::Surface, 
-    physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR)
-    -> (vk::SurfaceTransformFlagsKHR, vk::CompositeAlphaFlagsKHR)  {
+physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR)
+-> (vk::SurfaceTransformFlagsKHR, vk::CompositeAlphaFlagsKHR) {
     let capabilities = 
         unsafe{surface_loader.get_physical_device_surface_capabilities(physical_device, surface)}.unwrap();
     println!("'{:?}' is selected as pre_transform and '{:?}' is selected as composite_alpha", 
@@ -242,9 +241,9 @@ type IndexBufferElementType = u16;
 #[allow(dead_code)]
 #[repr(C)] // C representation needed, otherwise Rust makes uv field come before color field in memory, which Vulkan does not expect.
 pub struct Vertex {
-    pos: [f32; 2],
-    color: [f32; 3],
-    uv: [f32; 2]
+    pos: glam::Vec3,
+    color: glam::Vec3,
+    uv: glam::Vec2
 }
 
 #[repr(C)]
@@ -321,6 +320,10 @@ pub struct Renderer {
     texture_image_device_memory: vk::DeviceMemory,
     texture_image_view: vk::ImageView,
     texture_sampler: vk::Sampler,
+
+    depth_images: Vec<vk::Image>,
+    depth_image_device_memories: Vec<vk::DeviceMemory>,
+    depth_image_views: Vec<vk::ImageView>,
 
     pub start_time: std::time::Instant
 }
@@ -418,7 +421,7 @@ impl Renderer {
         let swapchain_image_count = swapchain_images.len();
         let mut swapchain_image_views = Vec::<vk::ImageView>::with_capacity(swapchain_images.len());
         for image in &swapchain_images {
-            swapchain_image_views.push(Renderer::create_image_view(&device, *image, surface_format));
+            swapchain_image_views.push(Renderer::create_image_view(&device, *image, surface_format, vk::ImageAspectFlags::COLOR));
         }
         // ________________________________________________________________________________________________________________
 
@@ -472,7 +475,7 @@ impl Renderer {
         // ________________________________________________________________________________________________________________
 
         // CREATE ATTACHMENT DESCRIPTIONS AND ATTACHMENT REFERENCES:_______________________________________________________
-        let attachment_desc = vk::AttachmentDescription {
+        let color_attachment_desc = vk::AttachmentDescription {
             flags: vk::AttachmentDescriptionFlags::empty(),
             format: surface_format,
             samples: vk::SampleCountFlags::TYPE_1,
@@ -483,9 +486,26 @@ impl Renderer {
             initial_layout: vk::ImageLayout::UNDEFINED,
             final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
         };
-        let attachment_ref = vk::AttachmentReference {
+        let color_attachment_ref = vk::AttachmentReference {
             attachment: 0, // Specifies which attachment to reference by its index in the attachment descriptions array. 
             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, // Specifies which layout we would like the attachment to have during a subpass that uses this reference. Vulkan will automatically transition the attachment to this layout when the subpass is started. 
+        };
+        
+        let depth_format = vk::Format::D32_SFLOAT;
+        let depth_attachment_desc = vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format: depth_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        };
+        let depth_attachment_ref = vk::AttachmentReference {
+            attachment: 1,
+            layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
         };
         // ________________________________________________________________________________________________________________
 
@@ -508,9 +528,9 @@ impl Renderer {
             input_attachment_count: 0,
             p_input_attachments: ptr::null(),
             color_attachment_count: 1,
-            p_color_attachments: &attachment_ref,
+            p_color_attachments: &color_attachment_ref,
             p_resolve_attachments: ptr::null(),
-            p_depth_stencil_attachment: ptr::null(),
+            p_depth_stencil_attachment: &depth_attachment_ref,
             preserve_attachment_count: 0,
             p_preserve_attachments: ptr::null(),
         };
@@ -519,21 +539,25 @@ impl Renderer {
         let subpass_dependency = vk::SubpassDependency{
             src_subpass: vk::SUBPASS_EXTERNAL, // VK_SUBPASS_EXTERNAL refers to all subpasses in all render passes before (if used in srcSubpass) or after (if used in dstSubpass) this render pass. Without it you would only be able to synchronize subpasses within the current render pass. You wouldn't be able to, for example, wait for a previous render pass to complete before executing this subpass.
             dst_subpass: 0, // If we want to depend on a subpass that's part of a after render pass, we can just pass in VK_SUBPASS_EXTERNAL here. 
-            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, // Finish this pipeline stage in src_subpass before moving to dst_subpass.
-            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT, // We are not allowed to execute this stage until stages in src_stage_mask are complete. All of the stages until Color_attachment_output, Vulkan is free to execute in any other it wants.
+            // Finish this pipeline stage in src_subpass before moving to dst_subpass.
+            src_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS, 
+            // We are not allowed to execute this stage until stages in src_stage_mask are complete. All of the stages until Color_attachment_output, Vulkan is free to execute in any other it wants.
+            dst_stage_mask: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS, 
             // About src/dst access masks: https://www.reddit.com/r/vulkan/comments/muo5ud/comment/gv8kzxi/?utm_source=share&utm_medium=web2x&context=3 . 
             // So for a scenario: src_access_mask should be done/flushed in caches if it wrote anything, before dst_access_mask can read.
             // In this scenario, src_access_mask would be COLOR_ATTACHMENT_WRITE and dst_access_mask would be COLOR_ATTACHMENT_READ.
             src_access_mask: vk::AccessFlags::empty(), // is a bitmask of all the Vulkan memory access types used by srcSubpass.
-            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE, //  is a bitmask of all the Vulkan memory access types we're going to use in dstSubpass.
+            // This is a bitmask of all the Vulkan memory access types we're going to use in dstSubpass.
+            dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             dependency_flags: vk::DependencyFlags::empty(), // 0
         };
+        let attachment_descs = [color_attachment_desc, depth_attachment_desc];
         let render_pass_ci = vk::RenderPassCreateInfo {
             s_type: vk::StructureType::RENDER_PASS_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::RenderPassCreateFlags::empty(),
-            attachment_count: 1,
-            p_attachments: &attachment_desc,
+            attachment_count: attachment_descs.len() as u32,
+            p_attachments: attachment_descs.as_ptr(),
             subpass_count: 1,
             p_subpasses: &subpass_desc,
             dependency_count: 1,
@@ -543,39 +567,55 @@ impl Renderer {
         let render_pass = unsafe{device.create_render_pass(&render_pass_ci, None)}.unwrap();
         // ________________________________________________________________________________________________________________
 
-        // CREATE FRAMEBUFFER:_____________________________________________________________________________________________
-        // Info: Render passes operate in conjunction with framebuffers. Framebuffers represent a collection of
-        // specific memory attachments that a render pass instance uses.
-        let window_inner_size = window.inner_size();
-        let mut framebuffers : Vec<vk::Framebuffer> = Vec::with_capacity(swapchain_image_views.len());
-        for image_view in &swapchain_image_views {
-            framebuffers.push(Renderer::create_framebuffer(&device, *image_view, render_pass, window_inner_size));
-        }
-        // ________________________________________________________________________________________________________________
 
         // VERTEX CREATION AND BINDING DESC & ATTRIBUTE DESCS:__________________________________________________________________
         let vertices = vec![
-            Vertex{
-                pos:   [-0.9, -0.9],
-                color: [1.0, 0.0, 0.0],
-                uv:    [1.0, 0.0]
+            Vertex {
+                pos:   glam::Vec3::new(-0.9, -0.9, 0.0),
+                color: glam::Vec3::new(1.0, 0.0, 0.0),
+                uv:    glam::Vec2::new(1.0, 0.0)
             },
             Vertex{
-                pos:   [-0.9, 0.9],
-                color: [0.0, 1.0, 0.0],
-                uv:    [0.0, 0.0]
+                pos:   glam::Vec3::new(-0.9, 0.9, 0.0),
+                color: glam::Vec3::new(0.0, 1.0, 0.0),
+                uv:    glam::Vec2::new(0.0, 0.0)
             },
             Vertex{
-                pos:   [0.9, 0.9],
-                color: [0.0, 0.0, 1.0],
-                uv:    [0.0, 1.0]
+                pos:   glam::Vec3::new(0.9, 0.9, 0.0),
+                color: glam::Vec3::new(0.0, 0.0, 1.0),
+                uv:    glam::Vec2::new(0.0, 1.0)
             },
             Vertex{
-                pos:   [0.9, -0.9],
-                color: [1.0, 1.0, 1.0],
-                uv:    [1.0, 1.0]
-            }];
-        let indices: Vec<IndexBufferElementType> = vec![0, 1, 2, 0, 2, 3];
+                pos:   glam::Vec3::new(0.9, -0.9, 0.0),
+                color: glam::Vec3::new(1.0, 1.0, 1.0),
+                uv:    glam::Vec2::new(1.0, 1.0)
+            },
+            
+            Vertex {
+                pos:   glam::Vec3::new(-0.9, -0.9, -0.5),
+                color: glam::Vec3::new(1.0, 0.0, 0.0),
+                uv:    glam::Vec2::new(1.0, 0.0)
+            },
+            Vertex{
+                pos:   glam::Vec3::new(-0.9, 0.9, -0.5),
+                color: glam::Vec3::new(0.0, 1.0, 0.0),
+                uv:    glam::Vec2::new(0.0, 0.0)
+            },
+            Vertex{
+                pos:   glam::Vec3::new(0.9, 0.9, -0.5),
+                color: glam::Vec3::new(0.0, 0.0, 1.0),
+                uv:    glam::Vec2::new(0.0, 1.0)
+            },
+            Vertex{
+                pos:   glam::Vec3::new(0.9, -0.9, -0.5),
+                color: glam::Vec3::new(1.0, 1.0, 1.0),
+                uv:    glam::Vec2::new(1.0, 1.0)
+            }
+            ];
+        let indices: Vec<IndexBufferElementType> = vec![
+            0, 1, 2, 0, 2, 3,
+            4, 5, 6, 6, 7, 4
+        ];
 
         let vertex_input_binding_desc = vk::VertexInputBindingDescription {
             binding: 0,
@@ -586,7 +626,7 @@ impl Renderer {
         let vertex_input_attribute_desc1 = vk::VertexInputAttributeDescription{
             location: 0,
             binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
+            format: vk::Format::R32G32B32_SFLOAT,
             offset: 0,
         };
         let vertex_input_attribute_desc2 = vk::VertexInputAttributeDescription{
@@ -601,8 +641,6 @@ impl Renderer {
             format: vk::Format::R32G32_SFLOAT,
             offset: (std::mem::size_of_val(&vertices[0].pos) + std::mem::size_of_val(&vertices[0].color)) as u32
         };
-
-        println!("Size of Vertex: {}", std::mem::size_of::<Vertex>());
 
         let vertex_input_attribute_descriptions = 
             [vertex_input_attribute_desc1, vertex_input_attribute_desc2, vertex_input_attribute_desc3];
@@ -724,6 +762,36 @@ impl Renderer {
         }
         // ________________________________________________________________________________________________________________
 
+        // DEPTH IMAGES:___________________________________________________________________________________________________
+        let window_inner_size = window.inner_size();
+        
+        // Note: It is actually make more sense to create frame_in_flight_count amount of depth buffers, but for code simplicity,
+        // I do create swapchain_image_count amount for now:
+        let mut depth_images: Vec<vk::Image> = Vec::with_capacity(swapchain_image_count);
+        let mut depth_image_device_memories: Vec<vk::DeviceMemory> = Vec::with_capacity(swapchain_image_count);
+        let mut depth_image_views: Vec<vk::ImageView> = Vec::with_capacity(swapchain_image_count);
+        for _ in 0..swapchain_image_count {
+            // We do not access this image directly from CPU, so it does not need to be LINEAR tiling.
+            // If a direct mapping from CPU is needed, you could have used LINEAR tiling so, RAM and VRAM does not differ in layout. 
+            let (depth_image, depth_image_device_memory, depth_image_view) = 
+                Renderer::create_depth_image_and_view(&device, &instance, physical_device, window_inner_size, depth_format);
+
+            depth_images.push(depth_image);
+            depth_image_device_memories.push(depth_image_device_memory);
+            depth_image_views.push(depth_image_view);
+        }
+        // ________________________________________________________________________________________________________________
+
+        
+        // CREATE FRAMEBUFFER:_____________________________________________________________________________________________
+        // Info: Render passes operate in conjunction with framebuffers. Framebuffers represent a collection of
+        // specific memory attachments that a render pass instance uses.
+        let mut framebuffers : Vec<vk::Framebuffer> = Vec::with_capacity(swapchain_image_views.len());
+        for (idx, image_view) in swapchain_image_views.iter().enumerate() {
+            framebuffers.push(Renderer::create_framebuffer(&device, &[*image_view, depth_image_views[idx]], render_pass, window_inner_size));
+        }
+        // ________________________________________________________________________________________________________________
+
         // LOAD IMAGE______________________________________________________________________________________________________
         let image_reader = image::io::Reader::open("./images/texture.jpg").unwrap();
         let image_buffer = image_reader.decode().unwrap().into_rgba8();
@@ -733,8 +801,6 @@ impl Renderer {
             create_buffer(image_bytes.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, 
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
 
-        println!("image_staging_buffer_device_memory_size: {}, img_bytes.len(): {}",
-             image_staging_buffer_device_memory_size, image_bytes.len());
         // Info: "Each resource may need more memory than the requested size of a resource. It's because drivers may need 
         // some additional meta-data to manage given resource. That's why we need to call vkGet...MemoryRequirements() 
         // functions and allocate enough memory.But when we want to modify contents of a buffer or image we need to think 
@@ -747,55 +813,10 @@ impl Renderer {
         }
 
         // Create Image:
-        let texture_image_ci = vk::ImageCreateInfo {
-            s_type: vk::StructureType::IMAGE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::ImageCreateFlags::empty(),
-            image_type: vk::ImageType::TYPE_2D,
-            format: vk::Format::R8G8B8A8_SRGB,
-            extent: vk::Extent3D{
-                width: image_buffer.width(),
-                height: image_buffer.height(),
-                depth: 1
-            },
-            mip_levels: 1,
-            array_layers: 1,
-            samples: vk::SampleCountFlags::TYPE_1,
-            // We do not access this image directly from CPU, so it does not need to be LINEAR tiling.
-            // If a direct mapping from CPU is needed, you could have used LINEAR tiling so, RAM and VRAM does not differ in layout. 
-            tiling: vk::ImageTiling::OPTIMAL, 
-            usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            queue_family_index_count: 0,
-            p_queue_family_indices: ptr::null(), // Ignored if image sharing is not CONCURRENT.
-            initial_layout: vk::ImageLayout::UNDEFINED,
-        };
-        let texture_image = unsafe{device.create_image(&texture_image_ci, None).unwrap()};
-        
-        
-        let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
-
-        let required_memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        let mut memory_type_idx = 0;
-        let texture_image_memory_requirements = unsafe{device.get_image_memory_requirements(texture_image)};
-        println!("Image supported memory type bits: {:b}", texture_image_memory_requirements.memory_type_bits);
-        for (idx, physical_device_memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
-            if physical_device_memory_type.property_flags.contains(required_memory_flags) &&
-            ((1 << idx) & texture_image_memory_requirements.memory_type_bits) == (1 << idx) {
-                memory_type_idx = idx;
-                break;
-            }
-        }
-        println!("Texture Image Allocation: found memory_type_idx: {}", memory_type_idx);
-        
-        let texture_image_mem_alloc_info = vk::MemoryAllocateInfo {
-            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            allocation_size: texture_image_memory_requirements.size,
-            memory_type_index: memory_type_idx as u32,
-        };
-        let texture_image_device_memory = unsafe{device.allocate_memory(&texture_image_mem_alloc_info, None)}.unwrap();
-        unsafe{device.bind_image_memory(texture_image, texture_image_device_memory, 0)}.unwrap();
+        let (texture_image, texture_image_device_memory) = Renderer::create_image(
+            &device, &instance, physical_device, image_buffer.width(), image_buffer.height(), 
+            vk::Format::R8G8B8A8_SRGB, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL);       
 
         let transition_image_layout = |cmd_buffer: vk::CommandBuffer, transition_image: vk::Image, 
             old_layout: vk::ImageLayout, new_layout: vk::ImageLayout,
@@ -941,6 +962,8 @@ impl Renderer {
 
         // Create Texture Sampler:
         let physical_device_properties = unsafe{instance.get_physical_device_properties(physical_device)};
+        let format_props = unsafe{instance.get_physical_device_format_properties(physical_device, vk::Format::R8G8B8A8_SRGB)};
+        println!("format probs: {:?}", format_props);
         let texture_sampler_ci = vk::SamplerCreateInfo {
             s_type: vk::StructureType::SAMPLER_CREATE_INFO,
             p_next: ptr::null(),
@@ -1027,7 +1050,6 @@ impl Renderer {
         };
         let descriptor_sets = unsafe{device.allocate_descriptor_sets(&descriptor_set_alloc_info)}.unwrap();
 
-        println!("sizeof uniformbufferobject: {}", std::mem::size_of::<UniformBufferObject>());
         // Update descriptor buffers:
         for frame_idx in 0..frames_in_flight_count as usize {
            let descriptor_buffer_info = vk::DescriptorBufferInfo {
@@ -1107,7 +1129,7 @@ impl Renderer {
             rasterizer_discard_enable: vk::FALSE, //
             polygon_mode: vk::PolygonMode::FILL,
             cull_mode: vk::CullModeFlags::BACK,
-            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
+            front_face: vk::FrontFace::CLOCKWISE,
             // The rasterizer can alter the depth values by adding a constant value or biasing them based on a fragment's slope.
             depth_bias_enable: vk::FALSE,
             depth_bias_constant_factor: 0.0f32,
@@ -1125,6 +1147,20 @@ impl Renderer {
             p_sample_mask: ptr::null(),
             alpha_to_coverage_enable: vk::FALSE,
             alpha_to_one_enable: vk::FALSE
+        };
+        let depth_stencil_state_ci = vk::PipelineDepthStencilStateCreateInfo {
+            s_type: vk::StructureType::PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::PipelineDepthStencilStateCreateFlags::empty(),
+            depth_test_enable: vk::TRUE,
+            depth_write_enable: vk::TRUE,
+            depth_compare_op: vk::CompareOp::LESS,
+            depth_bounds_test_enable: vk::FALSE,
+            stencil_test_enable: vk::FALSE,
+            front: vk::StencilOpState::default(),
+            back: vk::StencilOpState::default(),
+            min_depth_bounds: 0.0,
+            max_depth_bounds: 1.0,
         };
         // After a fragment shader has returned a color, it needs to be combined with the color that is already in the framebuffer. This transformation is known as color blending. and there are two ways to do it:
         //      Mix the old and new value to produce a final color
@@ -1180,7 +1216,7 @@ impl Renderer {
             p_viewport_state: &viewport_state_ci,
             p_rasterization_state: &rasterization_state_ci,
             p_multisample_state: &multisample_state_ci,
-            p_depth_stencil_state: ptr::null(),
+            p_depth_stencil_state: &depth_stencil_state_ci,
             p_color_blend_state: &color_blend_state_ci,
             p_dynamic_state: &dynamic_state_ci,
             layout: pipeline_layout,
@@ -1189,9 +1225,9 @@ impl Renderer {
             base_pipeline_handle: vk::Pipeline::null(),
             base_pipeline_index: 0,
         };
-        let graphics_pipeline_create_infos = [graphics_pipeline_ci];
+        let graphics_pipeline_cis = [graphics_pipeline_ci];
         let graphics_pipelines = unsafe{
-            device.create_graphics_pipelines(vk::PipelineCache::null(), &graphics_pipeline_create_infos, None).unwrap()
+            device.create_graphics_pipelines(vk::PipelineCache::null(), &graphics_pipeline_cis, None).unwrap()
         };
         //_________________________________________________________________________________________________________________
 
@@ -1257,7 +1293,7 @@ impl Renderer {
         unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, index_buffer_staging, index_buffer, &[indices_copy_region])};
         single_time_cmd_buffer_end(single_time_cmd_buffer, single_time_cmd_pool);
         //_________________________________________________________________________________________________________________
-
+        
         Renderer {
             entry,
             instance,
@@ -1313,6 +1349,10 @@ impl Renderer {
             texture_image_view,
             texture_sampler: texture_image_sampler,
 
+            depth_images,
+            depth_image_device_memories,
+            depth_image_views,
+
             start_time: std::time::Instant::now()
         }
     }
@@ -1340,9 +1380,16 @@ impl Renderer {
             flags: vk::CommandBufferUsageFlags::empty(),
             p_inheritance_info: ptr::null(), // Used if this is a secondary command buffer, otherwise this value is ignored.
         };
-        let clear_value = vk::ClearValue {
-            color: vk::ClearColorValue{float32: [0.0f32, 0.0f32, 0.0f32, 1.0f32]},
+        let color_clear_value = vk::ClearValue {
+            color: vk::ClearColorValue{float32: [0.0f32, 0.0f32, 0.0f32, 1.0f32]}
         };
+        let depth_clear_value = vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue{
+                depth: 1.0,
+                stencil: 0,
+            }
+        };
+        let clear_values = [color_clear_value, depth_clear_value]; // Index order must match the order of attachments.
         let render_pass_begin_info = vk::RenderPassBeginInfo {
             s_type: vk::StructureType::RENDER_PASS_BEGIN_INFO,
             p_next: ptr::null(),
@@ -1352,8 +1399,8 @@ impl Renderer {
                 offset: vk::Offset2D{x: 0, y: 0},
                 extent: vk::Extent2D{width: window_inner_size.width, height: window_inner_size.height}
             },
-            clear_value_count: 1,
-            p_clear_values: &clear_value
+            clear_value_count: clear_values.len() as u32,
+            p_clear_values: clear_values.as_ptr()
         };
 
         // A viewport basically describes the region of the framebuffer that the output will be rendered to. 
@@ -1381,7 +1428,7 @@ impl Renderer {
         let time_since_start = std::time::Instant::now() - self.start_time;
         let ubo = UniformBufferObject {
             model: glam::Mat4::from_rotation_z(time_since_start.as_millis() as f32 / 1000.0f32),
-            view:  glam::Mat4::look_at_lh(glam::vec3(0.0, 1.5, -1.5), glam::vec3(0.0, 0.0, 0.0), glam::vec3(0.0, 1.0, 0.0)),     
+            view:  glam::Mat4::look_at_lh(glam::vec3(0.0, 1.5, 1.5), glam::vec3(0.0, 0.0, 0.0), glam::vec3(0.0, 0.0, -1.0)),     
             projection: glam::Mat4::perspective_lh(std::f32::consts::PI / 2.5f32, window_inner_size.width as f32 / window_inner_size.height as f32, 0.1, 100.0)
         };
         unsafe{
@@ -1450,7 +1497,8 @@ impl Renderer {
         self.current_frame_in_flight_idx = (self.current_frame_in_flight_idx + 1) % (self.frames_in_flight_count as usize);
     }
     /// Logical device takes a DeviceQueueCreateInfo as a parameter. Therefore, Logical Device creates DeviceQueues.
-    fn create_device(instance : &ash::Instance, physical_device: vk::PhysicalDevice, graphics_queue_idx: u32) -> ash::Device {
+    fn create_device(instance : &ash::Instance, physical_device: vk::PhysicalDevice, 
+    graphics_queue_idx: u32) -> ash::Device {
         let queue_priority = [1.0f32];
         let queue_create_infos = vec![vk::DeviceQueueCreateInfo {
             s_type: vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
@@ -1478,7 +1526,8 @@ impl Renderer {
         unsafe{instance.create_device(physical_device, &device_create_info, None).unwrap()}
     }
 
-    fn create_image_view(device: &ash::Device, image: vk::Image, surface_format: vk::Format) -> vk::ImageView {
+    fn create_image_view(device: &ash::Device, image: vk::Image, surface_format: vk::Format, 
+    aspect_mask: vk::ImageAspectFlags) -> vk::ImageView {
         let image_view_ci = vk::ImageViewCreateInfo {
             s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
             p_next: ptr::null(),
@@ -1493,7 +1542,7 @@ impl Renderer {
                 a: vk::ComponentSwizzle::IDENTITY
             },
             subresource_range: vk::ImageSubresourceRange{
-                aspect_mask: vk::ImageAspectFlags::COLOR,
+                aspect_mask: aspect_mask,
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
@@ -1504,10 +1553,9 @@ impl Renderer {
         unsafe{device.create_image_view(&image_view_ci, None)}.unwrap()
     }
 
-    fn create_framebuffer(device: &ash::Device, attachment: vk::ImageView, 
-        render_pass: vk::RenderPass, window_inner_size: dpi::PhysicalSize<u32>)
-         -> vk::Framebuffer {
-        let attachments = [attachment];
+    fn create_framebuffer(device: &ash::Device, attachments: &[vk::ImageView], 
+    render_pass: vk::RenderPass, window_inner_size: dpi::PhysicalSize<u32>)
+    -> vk::Framebuffer {
         let framebuffer_ci = vk::FramebufferCreateInfo {
             s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
             p_next: ptr::null(),
@@ -1521,11 +1569,19 @@ impl Renderer {
         };
 
         unsafe{device.create_framebuffer(&framebuffer_ci, None)}.unwrap()
-        
     }
 
+    pub fn window_resized(&mut self, window_new_inner_size: winit::dpi::PhysicalSize<u32>) {
+        unsafe{self.device.device_wait_idle()}.unwrap();
+        self.recreate_swapchain(window_new_inner_size);
+        self.recreate_depth_images(window_new_inner_size);
+        self.recreate_framebuffers(window_new_inner_size);
+
+        println!("Swapchain, depth images and framebuffers are recreated with window inner size: {:?}", window_new_inner_size);
+    }
     fn recreate_swapchain(&mut self, window_new_inner_size: winit::dpi::PhysicalSize<u32>) {        
         unsafe{self.swapchain_loader.destroy_swapchain(self.swapchain, None)};
+
         let swapchain_needs = SwapchainCreationNeeds {
             surface_format: self.surface_format,
             surface_color_space: self.surface_color_space,
@@ -1539,30 +1595,50 @@ impl Renderer {
         };
         self.swapchain = Renderer::create_swapchain(&swapchain_needs);
         
-        // IMAGE VIEWS RECREATION:
         for image_view in &self.swapchain_image_views {
             unsafe{self.device.destroy_image_view(*image_view, None)};
         }
         self.swapchain_image_views.clear();
+
         self.swapchain_images = unsafe{self.swapchain_loader.get_swapchain_images(self.swapchain)}.unwrap();
         for image in &self.swapchain_images {
-            self.swapchain_image_views.push(Renderer::create_image_view(&self.device, *image, self.surface_format));
+            self.swapchain_image_views.push(Renderer::create_image_view(&self.device, *image, self.surface_format, vk::ImageAspectFlags::COLOR));
         }
+    }
 
-        // FRAMEBUFFER RECREATION:
+    fn recreate_depth_images(&mut self, window_new_inner_size: dpi::PhysicalSize<u32>) {
+        for image_view in &self.depth_image_views {
+            unsafe{self.device.destroy_image_view(*image_view, None)};
+        }
+        self.depth_image_views.clear();
+        for image in &self.depth_images {
+            unsafe{self.device.destroy_image(*image, None)};
+        }
+        self.depth_images.clear();
+        for device_memory in &self.depth_image_device_memories {
+            unsafe{self.device.free_memory(*device_memory, None)};
+        }
+        self.depth_image_device_memories.clear();
+        let swapchain_image_count = self.swapchain_images.len();
+        for _ in 0.. swapchain_image_count{
+            let (depth_image, depth_image_device_memory, depth_image_view) = 
+                Renderer::create_depth_image_and_view(&self.device, &self.instance, self.physical_device,
+                window_new_inner_size, vk::Format::D32_SFLOAT);
+            self.depth_images.push(depth_image);
+            self.depth_image_device_memories.push(depth_image_device_memory);
+            self.depth_image_views.push(depth_image_view);
+        }        
+    }
+
+    fn recreate_framebuffers(&mut self, window_new_inner_size: dpi::PhysicalSize<u32>) {
         for framebuffer in &self.framebuffers {
             unsafe{self.device.destroy_framebuffer(*framebuffer, None)};
         }
         self.framebuffers.clear(); // Capacity of the Vec stays same after clearing.
-        for image_view in &self.swapchain_image_views {
-            self.framebuffers.push(Renderer::create_framebuffer(&self.device, *image_view, self.render_pass, window_new_inner_size));
+        for (idx, swapchain_image_view) in self.swapchain_image_views.iter().enumerate() {
+            self.framebuffers.push(Renderer::create_framebuffer(
+                &self.device, &[*swapchain_image_view, self.depth_image_views[idx]], self.render_pass, window_new_inner_size));
         }
-        println!("Swapchain is recreated with new window inner size: {:?}", window_new_inner_size);
-    }
-
-    pub fn window_resized(&mut self, window_new_inner_size: winit::dpi::PhysicalSize<u32>) {
-        unsafe{self.device.device_wait_idle()}.unwrap();
-        self.recreate_swapchain(window_new_inner_size);
     }
     pub fn create_swapchain(needs: &SwapchainCreationNeeds) -> vk::SwapchainKHR {
         let swapchain_ci = vk::SwapchainCreateInfoKHR {
@@ -1599,6 +1675,71 @@ impl Renderer {
 
         unsafe {needs.swapchain_loader.create_swapchain(&swapchain_ci, None)}.unwrap()
     }
+
+    fn create_image(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
+    width: u32, height: u32, format: vk::Format, tiling: 
+    vk::ImageTiling, usage: vk::ImageUsageFlags, mem_prop_flag: vk::MemoryPropertyFlags) -> (vk::Image, vk::DeviceMemory) {
+        let image_ci = vk::ImageCreateInfo {
+            s_type: vk::StructureType::IMAGE_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::ImageCreateFlags::empty(),
+            image_type: vk::ImageType::TYPE_2D,
+            format: format,
+            extent: vk::Extent3D{
+                width: width,
+                height: height,
+                depth: 1
+            },
+            mip_levels: 1,
+            array_layers: 1,
+            samples: vk::SampleCountFlags::TYPE_1,
+            tiling: tiling, 
+            usage: usage,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            queue_family_index_count: 0,
+            p_queue_family_indices: ptr::null(), // Ignored if image sharing is not CONCURRENT.
+            initial_layout: vk::ImageLayout::UNDEFINED,
+        };
+        let image = unsafe{device.create_image(&image_ci, None).unwrap()};
+        
+        let physical_device_memory_properties = 
+            unsafe{instance.get_physical_device_memory_properties(physical_device)};
+        let required_memory_flags = mem_prop_flag;
+        let mut memory_type_idx = 0;
+        let image_memory_requirements = unsafe{device.get_image_memory_requirements(image)};
+        // println!("Image supported memory type bits: {:b}", image_memory_requirements.memory_type_bits);
+        for (idx, physical_device_memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
+            if physical_device_memory_type.property_flags.contains(required_memory_flags) &&
+            ((1 << idx) & image_memory_requirements.memory_type_bits) == (1 << idx) {
+                memory_type_idx = idx;
+                break;
+            }
+        }
+        // println!("Texture Image Allocation: found memory_type_idx: {}", memory_type_idx);
+        
+
+        let image_mem_alloc_info = vk::MemoryAllocateInfo {
+            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            allocation_size: image_memory_requirements.size,
+            memory_type_index: memory_type_idx as u32,
+        };
+        let image_device_memory = unsafe{device.allocate_memory(&image_mem_alloc_info, None)}.unwrap();
+    
+        unsafe{device.bind_image_memory(image, image_device_memory, 0)}.unwrap();
+
+        (image, image_device_memory)
+    }
+
+    fn create_depth_image_and_view (device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
+    window_inner_size: dpi::PhysicalSize<u32>, depth_format: vk::Format) -> (vk::Image, vk::DeviceMemory, vk::ImageView) {
+        let (depth_image, depth_image_device_memory) = Renderer::create_image(
+            &device, &instance, physical_device, window_inner_size.width, window_inner_size.height, 
+            depth_format, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL);
+        let depth_image_view = Renderer::create_image_view(&device, depth_image, depth_format, vk::ImageAspectFlags::DEPTH);
+
+        (depth_image, depth_image_device_memory, depth_image_view)
+    }
 }
 
 impl Drop for Renderer {
@@ -1631,11 +1772,17 @@ impl Drop for Renderer {
             self.device.destroy_buffer(*buffer, None);
         }
         self.device.destroy_image(self.texture_image, None);
+        for depth_image in &self.depth_images {
+            self.device.destroy_image(*depth_image, None);
+        }
         self.device.free_memory(self.vertex_buffer_device_memory, None);
         self.device.free_memory(self.vertex_buffer_staging_device_memory, None);
         self.device.free_memory(self.index_buffer_device_memory, None);
         self.device.free_memory(self.index_buffer_staging_device_memory, None);
         self.device.free_memory(self.texture_image_device_memory, None);
+        for depth_image_device_memory in &self.depth_image_device_memories {
+            self.device.free_memory(*depth_image_device_memory, None);
+        }
         for memory in &self.uniform_buffer_device_memories {
             self.device.free_memory(*memory, None);
         }
@@ -1650,6 +1797,9 @@ impl Drop for Renderer {
         }
         self.device.destroy_sampler(self.texture_sampler, None);
         self.device.destroy_image_view(self.texture_image_view, None);
+        for depth_image_view in &self.depth_image_views {
+            self.device.destroy_image_view(*depth_image_view, None);
+        }
         // Swapchain images are automatically destroyed when swapchain is destroyed.     
         self.swapchain_loader.destroy_swapchain(self.swapchain, None);
         self.surface_loader.destroy_surface(self.surface, None);
