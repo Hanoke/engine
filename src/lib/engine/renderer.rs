@@ -238,7 +238,6 @@ physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR)
 }
 
 type IndexBufferElementType = u16;
-#[allow(dead_code)]
 #[repr(C)] // C representation needed, otherwise Rust makes uv field come before color field in memory, which Vulkan does not expect.
 pub struct Vertex {
     pos: glam::Vec3,
@@ -265,7 +264,6 @@ pub struct SwapchainCreationNeeds<'a> {
     swapchain_loader: &'a extensions::khr::Swapchain,
 }
 
-#[allow(dead_code)]
 pub struct Renderer {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
@@ -414,9 +412,8 @@ impl Renderer {
         };
         
         let swapchain = Renderer::create_swapchain(&swapchain_needs);
-        // ________________________________________________________________________________________________________________
 
-        // CREATE IMAGEVIEWS OF SWAPCHAIN IMAGES: _________________________________________________________________________
+        // CREATE IMAGEVIEWS OF SWAPCHAIN IMAGES:
         let swapchain_images = unsafe{swapchain_loader.get_swapchain_images(swapchain)}.unwrap();
         let swapchain_image_count = swapchain_images.len();
         let mut swapchain_image_views = Vec::<vk::ImageView>::with_capacity(swapchain_images.len());
@@ -652,7 +649,7 @@ impl Renderer {
             for idx in 0..physical_device_memory_properties.memory_type_count as usize {
                 println!("[{idx}] {:?}", physical_device_memory_properties.memory_types[idx]);
             }
-            for idx in 0..physical_device_memory_properties.memory_heap_count as usize{
+            for idx in 0..physical_device_memory_properties.memory_heap_count as usize {
                 println!("[{idx}] {:?}", physical_device_memory_properties.memory_heaps[idx]);
             }
         }
@@ -671,8 +668,6 @@ impl Renderer {
             };
 
             let buffer = unsafe{device.create_buffer(&buffer_ci, None)}.unwrap();
-
-            let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
 
             let mut memory_type_idx = 0;
             let buffer_memory_requirements = unsafe{device.get_buffer_memory_requirements(buffer)};
@@ -711,11 +706,11 @@ impl Renderer {
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
             );
         let (vertex_buffer, vertex_buffer_device_memory, _vertex_buffer_memory_size) = 
-        create_buffer(
-            (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
-            vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL
-        );
+            create_buffer(
+                (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL
+            );
         // Copy actual RAM to VRAM by direct mapping:
         unsafe {
         let data_ptr = device.map_memory(vertex_buffer_staging_device_memory, 0, vertex_buffer_staging_memory_size, vk::MemoryMapFlags::empty()).unwrap();
@@ -724,11 +719,11 @@ impl Renderer {
         }
 
         let (index_buffer_staging, index_buffer_staging_device_memory, index_buffer_staging_memory_size) = 
-        create_buffer(
-            (indices.len() * std::mem::size_of::<IndexBufferElementType>()) as u64,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
-        );
+            create_buffer(
+                (indices.len() * std::mem::size_of::<IndexBufferElementType>()) as u64,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+            );
         let (index_buffer, index_buffer_device_memory, _index_buffer_memory_size) = 
             create_buffer(
                 (indices.len() * std::mem::size_of::<IndexBufferElementType>()) as u64,
@@ -753,6 +748,7 @@ impl Renderer {
                     vk::BufferUsageFlags::UNIFORM_BUFFER,
                     vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
                 );
+
             uniform_buffers.push(uniform_buffer);
             uniform_buffer_device_memories.push(uniform_buffer_device_memory);
             // Get persistent mapped memory pointers, since I am going to use it every frame:
@@ -942,23 +938,7 @@ impl Renderer {
         unsafe{device.free_memory(texture_image_staging_buffer_device_memory, None)};
 
         // Create texture image view:
-        let texture_image_view_ci = vk::ImageViewCreateInfo {
-            s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::ImageViewCreateFlags::empty(),
-            image: texture_image,
-            view_type: vk::ImageViewType::TYPE_2D,
-            format: vk::Format::R8G8B8A8_SRGB,
-            components: vk::ComponentMapping::default(),
-            subresource_range: vk::ImageSubresourceRange{
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer:0,
-                layer_count: 1,
-            },
-        };
-        let texture_image_view = unsafe{device.create_image_view(&texture_image_view_ci, None)}.unwrap();
+        let texture_image_view = Renderer::create_image_view(&device, texture_image, vk::Format::R8G8B8A8_SRGB, vk::ImageAspectFlags::COLOR);
 
         // Create Texture Sampler:
         let physical_device_properties = unsafe{instance.get_physical_device_properties(physical_device)};
