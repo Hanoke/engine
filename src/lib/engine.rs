@@ -1,5 +1,6 @@
 mod renderer;
 
+use winit::event::ElementState;
 use winit::event_loop;
 use winit::window;
 use winit::event;
@@ -13,7 +14,7 @@ pub struct Engine {
 impl Engine {
     pub fn new() -> Engine {
         let event_loop = winit::event_loop::EventLoop::new();
-        let window = winit::window::WindowBuilder::new().build(&event_loop).expect("Could not create a window.");
+        let window = winit::window::WindowBuilder::new().with_title("Hanokei Engine").build(&event_loop).expect("Could not create a window.");
         let renderer = renderer::Renderer::new(&window, 2);
 
         Engine {
@@ -26,12 +27,29 @@ impl Engine {
         // This bool is needed because WindowEvent::Resized with incorrect height and width is sent when program starts:
         // https://github.com/rust-windowing/winit/issues/2094
         let mut is_first_resized_event  = true;
+
+        let mut model_rotation: f32 = 1.2;
+        let mut is_mouse_button_left_pressed = false;
+        let model_rotation_speed: f32 = 0.005;
         
+        let mut model_scale : f32 = 1.0;
+        let model_scale_delta_multiplier: f32 = 0.2;
+
         self.event_loop.run(move |event, _, control_flow| {
             // Need to check this because when window is minimized,  WindowEvent::Resized is fired with (height: 0, width: 0).
             let window_inner_size = self.window.inner_size();
             if !(window_inner_size.height > 0 && window_inner_size.width > 0) { return;}
             match event {
+                event::Event::DeviceEvent { device_id: _, event } => {
+                    match event {
+                        event::DeviceEvent::MouseMotion { delta } => {
+                            if is_mouse_button_left_pressed {
+                                model_rotation += delta.0 as f32 * model_rotation_speed;
+                            }
+                        },
+                        _ => {}
+                    }
+                },
                 event::Event::WindowEvent { window_id, event } if window_id == self.window.id() => match event {
                     event::WindowEvent::CloseRequested => {
                         *control_flow = event_loop::ControlFlow::Exit;
@@ -44,6 +62,27 @@ impl Engine {
                                 },
                                 _ => {}
                             },
+                    },
+                    event::WindowEvent::MouseInput { device_id: _, state, button, modifiers: _ } => {
+                        match button {
+                            event::MouseButton::Left => {
+                                if !is_mouse_button_left_pressed && state == ElementState::Pressed {
+                                    is_mouse_button_left_pressed = true;
+                                } else {
+                                    // Released
+                                    is_mouse_button_left_pressed = false;
+                                }
+                            },
+                            _ => {}
+                        }
+                    },
+                    event::WindowEvent::MouseWheel { device_id, delta, phase, modifiers } => {
+                        match delta {
+                            event::MouseScrollDelta::LineDelta(x, y) => {
+                                model_scale -= y * model_scale_delta_multiplier;
+                            },
+                            _ => {}
+                        }
                     },
                     event::WindowEvent::Resized(new_inner_size) => {
                         if is_first_resized_event {
@@ -60,7 +99,7 @@ impl Engine {
                 },
                 event::Event::RedrawRequested(_window_id) => {
                     // println!("Event::Requested");
-                    self.renderer.render_frame(self.window.inner_size());
+                    self.renderer.render_frame(self.window.inner_size(), model_rotation, model_scale);
                 },
                 _ => {
                     *control_flow = event_loop::ControlFlow::Poll;

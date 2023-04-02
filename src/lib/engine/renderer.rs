@@ -3,6 +3,8 @@ use winit::{dpi, platform::windows::WindowExtWindows, };
 use std::ptr;
 use ash::{vk::{self, Bool32}, extensions};
 
+type IndicesType = u32;
+
 /// Returns **required** instance extension names.
 /// Note: There are 2 types of extensions: Device and Instance. You pass extensions to 
 /// corresponding type in DeviceCreateInfo or InstanceCreateInfo.
@@ -236,13 +238,82 @@ physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR)
 
     (capabilities.current_transform, capabilities.supported_composite_alpha)
 }
-
-type IndexBufferElementType = u16;
-#[repr(C)] // C representation needed, otherwise Rust makes uv field come before color field in memory, which Vulkan does not expect.
-pub struct Vertex {
+#[repr(C)]
+#[derive(Debug)]
+struct Vertex {
     pos: glam::Vec3,
-    color: glam::Vec3,
-    uv: glam::Vec2
+    uv:  glam::Vec2,
+}
+
+pub struct Model {
+    vertices:       Vec<Vertex>,
+    vertex_indices: Vec<IndicesType>, 
+}
+
+impl Model {
+    fn new (model_file_path: &str) -> Model {
+        let obj = obj::Obj::load(model_file_path).unwrap();
+        
+        let vertex_positions: Vec<glam::Vec3> = obj.data.position.iter().map(|pos| {glam::Vec3::from_array(*pos)}).collect();
+        let vertex_uvs: Vec<glam::Vec2> = obj.data.texture.iter().map(|uv| {
+            // ".obj" files need this operation on 'v-axis' to become compatible with vulkan.
+            glam::Vec2::from_array([uv[0], 1.0f32 - uv[1]])
+        }).collect();
+
+        let mut unique_index_tuples: Vec<(usize, usize)> = Vec::new();
+        // Each poly has 3 index_types.
+        let polys = &obj.data.objects[0].groups[0].polys;
+        let triangle_count = polys.len() * 3;
+        let mut vertex_indices: Vec<IndicesType> = Vec::with_capacity(triangle_count);
+        for  poly in polys {
+            // Index tuple has: (vertex position index, vertex uv index, vertex normal index).
+            for index_tuple in &poly.0 {
+                let as_tuple = (index_tuple.0, index_tuple.1.unwrap());
+                if unique_index_tuples.contains(&as_tuple) {
+                    let idx = unique_index_tuples.iter().position(|elem| {*elem == as_tuple}).unwrap();
+                    vertex_indices.push(idx as IndicesType);
+                } else {
+                    unique_index_tuples.push(as_tuple);
+                    vertex_indices.push((unique_index_tuples.len() - 1) as IndicesType);
+                }
+            }
+        }
+        
+        println!("There are {} vertex_positions.", vertex_positions.len());
+        println!("There are {} vertex_uvs", vertex_uvs.len());
+        println!("Found     {} unique vertices from vertex_positions and vertex_uvs.", unique_index_tuples.len());
+        println!("There are {} triangles.", triangle_count);
+        println!("There are {} vertex_indices.", vertex_indices.len());
+
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(unique_index_tuples.len());
+        for unique_index_tuple in unique_index_tuples {
+            vertices.push(Vertex { 
+                pos: vertex_positions[unique_index_tuple.0],
+                uv: vertex_uvs[unique_index_tuple.1]
+                })
+        }
+
+        Model {
+            vertices,
+            vertex_indices,
+        }
+    }
+    #[inline]
+    fn get_vertex_input_binding_stride () -> u32 {
+        std::mem::size_of::<Vertex>() as u32
+    }
+    #[inline]
+    fn get_vertex_buffer_size(&self) -> vk::DeviceSize {
+        (self.vertices.len() * Model::get_vertex_input_binding_stride() as usize) as u64
+    }
+    #[inline]
+    fn get_vertex_buffer_ptr(&self) -> *const Vertex {
+        self.vertices.as_ptr()
+    }
+    #[inline]
+    fn get_index_buffer_size (&self) -> vk::DeviceSize {
+        (self.vertex_indices.len() * std::mem::size_of::<IndicesType>()) as u64
+    }
 }
 
 #[repr(C)]
@@ -296,16 +367,15 @@ pub struct Renderer {
     pub frames_in_flight_count: u32,
     pub current_frame_in_flight_idx: usize,
 
-    pub vertices: Vec<Vertex>,
-    pub indices: Vec<IndexBufferElementType>,
+    pub model: Model,
     pub vertex_buffer: vk::Buffer,
-    pub vertex_buffer_staging: vk::Buffer,
+    pub vertex_staging_buffer: vk::Buffer,
     pub index_buffer: vk::Buffer,
-    pub index_buffer_staging: vk::Buffer,
+    pub index_staging_buffer: vk::Buffer,
     pub vertex_buffer_device_memory: vk::DeviceMemory,
-    pub vertex_buffer_staging_device_memory: vk::DeviceMemory,
+    pub vertex_staging_buffer_device_memory: vk::DeviceMemory,
     pub index_buffer_device_memory: vk::DeviceMemory,
-    pub index_buffer_staging_device_memory: vk::DeviceMemory,
+    pub index_staging_buffer_device_memory: vk::DeviceMemory,
     pub descriptor_set_layout: vk::DescriptorSetLayout,
  
     pub uniform_buffers: Vec<vk::Buffer>,
@@ -317,17 +387,20 @@ pub struct Renderer {
     texture_image: vk::Image,
     texture_image_device_memory: vk::DeviceMemory,
     texture_image_view: vk::ImageView,
-    texture_sampler: vk::Sampler,
+    texture_image_sampler: vk::Sampler,
 
     depth_images: Vec<vk::Image>,
     depth_image_device_memories: Vec<vk::DeviceMemory>,
     depth_image_views: Vec<vk::ImageView>,
 
-    pub start_time: std::time::Instant
+    pub start_time: std::time::Instant,
+    vk_index_type: vk::IndexType,
 }
 
 impl Renderer {
-    pub fn new (window: &winit::window::Window, frames_in_flight_count: u32) -> Renderer {
+    pub fn new(window: &winit::window::Window, frames_in_flight_count: u32) -> Renderer {
+        let model = Model::new("models/viking_room.obj");
+
         let entry = unsafe {ash::Entry::load().unwrap()};
         // CREATE APP INFO:________________________________________________________________________________________________
         let app_name = CString::new("Hanokei App").unwrap();
@@ -566,287 +639,29 @@ impl Renderer {
 
 
         // VERTEX CREATION AND BINDING DESC & ATTRIBUTE DESCS:__________________________________________________________________
-        let vertices = vec![
-            Vertex {
-                pos:   glam::Vec3::new(-0.9, -0.9, 0.0),
-                color: glam::Vec3::new(1.0, 0.0, 0.0),
-                uv:    glam::Vec2::new(1.0, 0.0)
-            },
-            Vertex{
-                pos:   glam::Vec3::new(-0.9, 0.9, 0.0),
-                color: glam::Vec3::new(0.0, 1.0, 0.0),
-                uv:    glam::Vec2::new(0.0, 0.0)
-            },
-            Vertex{
-                pos:   glam::Vec3::new(0.9, 0.9, 0.0),
-                color: glam::Vec3::new(0.0, 0.0, 1.0),
-                uv:    glam::Vec2::new(0.0, 1.0)
-            },
-            Vertex{
-                pos:   glam::Vec3::new(0.9, -0.9, 0.0),
-                color: glam::Vec3::new(1.0, 1.0, 1.0),
-                uv:    glam::Vec2::new(1.0, 1.0)
-            },
-            
-            Vertex {
-                pos:   glam::Vec3::new(-0.9, -0.9, -0.5),
-                color: glam::Vec3::new(1.0, 0.0, 0.0),
-                uv:    glam::Vec2::new(1.0, 0.0)
-            },
-            Vertex{
-                pos:   glam::Vec3::new(-0.9, 0.9, -0.5),
-                color: glam::Vec3::new(0.0, 1.0, 0.0),
-                uv:    glam::Vec2::new(0.0, 0.0)
-            },
-            Vertex{
-                pos:   glam::Vec3::new(0.9, 0.9, -0.5),
-                color: glam::Vec3::new(0.0, 0.0, 1.0),
-                uv:    glam::Vec2::new(0.0, 1.0)
-            },
-            Vertex{
-                pos:   glam::Vec3::new(0.9, -0.9, -0.5),
-                color: glam::Vec3::new(1.0, 1.0, 1.0),
-                uv:    glam::Vec2::new(1.0, 1.0)
-            }
-            ];
-        let indices: Vec<IndexBufferElementType> = vec![
-            0, 1, 2, 0, 2, 3,
-            4, 5, 6, 6, 7, 4
-        ];
-
         let vertex_input_binding_desc = vk::VertexInputBindingDescription {
             binding: 0,
-            stride: std::mem::size_of::<Vertex>() as u32,
+            stride: Model::get_vertex_input_binding_stride(),
             input_rate: vk::VertexInputRate::VERTEX,
         };
         let vertex_input_binding_descriptions = [vertex_input_binding_desc];
-        let vertex_input_attribute_desc1 = vk::VertexInputAttributeDescription{
+        let vertex_input_pos_attribute_desc = vk::VertexInputAttributeDescription {
             location: 0,
             binding: 0,
             format: vk::Format::R32G32B32_SFLOAT,
             offset: 0,
         };
-        let vertex_input_attribute_desc2 = vk::VertexInputAttributeDescription{
-            location: 1,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: std::mem::size_of_val(&vertices[0].pos) as u32
-        };
-        let vertex_input_attribute_desc3 = vk::VertexInputAttributeDescription{
-            location: 2,
-            binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
-            offset: (std::mem::size_of_val(&vertices[0].pos) + std::mem::size_of_val(&vertices[0].color)) as u32
-        };
-
-        let vertex_input_attribute_descriptions = 
-            [vertex_input_attribute_desc1, vertex_input_attribute_desc2, vertex_input_attribute_desc3];
-        // ________________________________________________________________________________________________________________
-
-        // CREATE VERTICES BUFFER AND ALLOCATE IT:_________________________________________________________________________,
-        let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
-        { // List all memory types and memory heaps:
-            for idx in 0..physical_device_memory_properties.memory_type_count as usize {
-                println!("[{idx}] {:?}", physical_device_memory_properties.memory_types[idx]);
-            }
-            for idx in 0..physical_device_memory_properties.memory_heap_count as usize {
-                println!("[{idx}] {:?}", physical_device_memory_properties.memory_heaps[idx]);
-            }
-        }
-
-        let create_buffer = |size: u64, usage: vk::BufferUsageFlags, required_memory_flags: vk::MemoryPropertyFlags| 
-        -> (vk::Buffer, vk::DeviceMemory, vk::DeviceSize) {
-            let buffer_ci = vk::BufferCreateInfo {
-                s_type: vk::StructureType::BUFFER_CREATE_INFO,
-                p_next: ptr::null(),
-                flags: vk::BufferCreateFlags::empty(),
-                size: size,
-                usage: usage,
-                sharing_mode: vk::SharingMode::EXCLUSIVE,
-                queue_family_index_count: 1,
-                p_queue_family_indices: &graphics_queue_family_idx,
+        let vertex_input_uv_attribute_desc = vk::VertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: vk::Format::R32G32_SFLOAT,
+                offset: std::mem::size_of::<glam::Vec3>() as u32
             };
-
-            let buffer = unsafe{device.create_buffer(&buffer_ci, None)}.unwrap();
-
-            let mut memory_type_idx = 0;
-            let buffer_memory_requirements = unsafe{device.get_buffer_memory_requirements(buffer)};
-            println!("Buffer supported memory type bits: {:b}", buffer_memory_requirements.memory_type_bits);
             
-            // Find required memory type in memory types AND this is suitable for the newly created buffer memory requirements:
-            // Info: Host coherent memory does not need flushing or invalidating.
-            for (idx, physical_device_memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
-                if physical_device_memory_type.property_flags.contains(required_memory_flags) &&
-                ((1 << idx) & buffer_memory_requirements.memory_type_bits) == (1 << idx) {
-                    memory_type_idx = idx;
-                    break;
-                }
-            }
-            println!("found memory_type_idx: {}", memory_type_idx);
-            
-            let buffer_mem_alloc_info = vk::MemoryAllocateInfo {
-                s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
-                p_next: ptr::null(),
-                // Note: Actual VRAM size might be different from RAM memory, cuz of alignments(I guess).
-                allocation_size: buffer_memory_requirements.size,
-                memory_type_index: memory_type_idx as u32,
-            };
-            let buffer_device_memory = unsafe{device.allocate_memory(&buffer_mem_alloc_info, None)}.unwrap();
-            
-            // Need to bind them too! This way, you can have more than one buffers that can be bound to a single device memory via offsets.
-            unsafe{device.bind_buffer_memory(buffer, buffer_device_memory, 0)}.unwrap();
-
-            (buffer, buffer_device_memory, buffer_memory_requirements.size) 
-        };
-
-        let (vertex_buffer_staging, vertex_buffer_staging_device_memory, vertex_buffer_staging_memory_size) = 
-            create_buffer(
-                (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
-            );
-        let (vertex_buffer, vertex_buffer_device_memory, _vertex_buffer_memory_size) = 
-            create_buffer(
-                (vertices.len() * std::mem::size_of::<Vertex>()) as u64,
-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL
-            );
-        // Copy actual RAM to VRAM by direct mapping:
-        unsafe {
-        let data_ptr = device.map_memory(vertex_buffer_staging_device_memory, 0, vertex_buffer_staging_memory_size, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(vertices.as_ptr(), data_ptr as *mut Vertex, vertices.len());
-        device.unmap_memory(vertex_buffer_staging_device_memory);
-        }
-
-        let (index_buffer_staging, index_buffer_staging_device_memory, index_buffer_staging_memory_size) = 
-            create_buffer(
-                (indices.len() * std::mem::size_of::<IndexBufferElementType>()) as u64,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
-            );
-        let (index_buffer, index_buffer_device_memory, _index_buffer_memory_size) = 
-            create_buffer(
-                (indices.len() * std::mem::size_of::<IndexBufferElementType>()) as u64,
-                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL
-            );
-        unsafe {
-        let data_ptr = device.map_memory(index_buffer_staging_device_memory, 0, index_buffer_staging_memory_size, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(indices.as_ptr(), data_ptr as *mut IndexBufferElementType, indices.len());
-        device.unmap_memory(index_buffer_staging_device_memory);
-        }
-        // ________________________________________________________________________________________________________________
-        
-        // CREATE UNIFORM BUFFERS: ________________________________________________________________________________________
-        let mut uniform_buffers: Vec<vk::Buffer>  = Vec::with_capacity(frames_in_flight_count as usize);
-        let mut uniform_buffer_device_memories: Vec<vk::DeviceMemory>  = Vec::with_capacity(frames_in_flight_count as usize);
-        let mut uniform_buffer_mapped_memory_ptrs: Vec<*mut c_void> = Vec::with_capacity(frames_in_flight_count as usize);
-        for _ in 0..frames_in_flight_count {
-            let (uniform_buffer, uniform_buffer_device_memory, uniform_buffer_memory_size) = 
-                create_buffer(
-                    std::mem::size_of::<UniformBufferObject>() as u64,
-                    vk::BufferUsageFlags::UNIFORM_BUFFER,
-                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
-                );
-
-            uniform_buffers.push(uniform_buffer);
-            uniform_buffer_device_memories.push(uniform_buffer_device_memory);
-            // Get persistent mapped memory pointers, since I am going to use it every frame:
-            uniform_buffer_mapped_memory_ptrs.push(
-                unsafe{device.map_memory(uniform_buffer_device_memory, 0, uniform_buffer_memory_size, vk::MemoryMapFlags::empty())}.unwrap()
-            );
-        }
-        // ________________________________________________________________________________________________________________
-
-        // DEPTH IMAGES:___________________________________________________________________________________________________
-        let window_inner_size = window.inner_size();
-        
-        // Note: It is actually make more sense to create frame_in_flight_count amount of depth buffers, but for code simplicity,
-        // I do create swapchain_image_count amount for now:
-        let mut depth_images: Vec<vk::Image> = Vec::with_capacity(swapchain_image_count);
-        let mut depth_image_device_memories: Vec<vk::DeviceMemory> = Vec::with_capacity(swapchain_image_count);
-        let mut depth_image_views: Vec<vk::ImageView> = Vec::with_capacity(swapchain_image_count);
-        for _ in 0..swapchain_image_count {
-            // We do not access this image directly from CPU, so it does not need to be LINEAR tiling.
-            // If a direct mapping from CPU is needed, you could have used LINEAR tiling so, RAM and VRAM does not differ in layout. 
-            let (depth_image, depth_image_device_memory, depth_image_view) = 
-                Renderer::create_depth_image_and_view(&device, &instance, physical_device, window_inner_size, depth_format);
-
-            depth_images.push(depth_image);
-            depth_image_device_memories.push(depth_image_device_memory);
-            depth_image_views.push(depth_image_view);
-        }
+        let vertex_input_attribute_descriptions = [vertex_input_pos_attribute_desc, vertex_input_uv_attribute_desc];
         // ________________________________________________________________________________________________________________
 
         
-        // CREATE FRAMEBUFFER:_____________________________________________________________________________________________
-        // Info: Render passes operate in conjunction with framebuffers. Framebuffers represent a collection of
-        // specific memory attachments that a render pass instance uses.
-        let mut framebuffers : Vec<vk::Framebuffer> = Vec::with_capacity(swapchain_image_views.len());
-        for (idx, image_view) in swapchain_image_views.iter().enumerate() {
-            framebuffers.push(Renderer::create_framebuffer(&device, &[*image_view, depth_image_views[idx]], render_pass, window_inner_size));
-        }
-        // ________________________________________________________________________________________________________________
-
-        // LOAD IMAGE______________________________________________________________________________________________________
-        let image_reader = image::io::Reader::open("./images/texture.jpg").unwrap();
-        let image_buffer = image_reader.decode().unwrap().into_rgba8();
-        let image_bytes: Vec<u8> = image_buffer.bytes().map(|byte| {byte.unwrap()}).collect();
-
-        let (texture_image_staging_buffer, texture_image_staging_buffer_device_memory, image_staging_buffer_device_memory_size) =
-            create_buffer(image_bytes.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, 
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT);
-
-        // Info: "Each resource may need more memory than the requested size of a resource. It's because drivers may need 
-        // some additional meta-data to manage given resource. That's why we need to call vkGet...MemoryRequirements() 
-        // functions and allocate enough memory.But when we want to modify contents of a buffer or image we need to think 
-        // only about its size (the size we requested during resource creation), not the data size returned by the mentioned 
-        // functions."
-        unsafe{
-        let data_ptr = device.map_memory(texture_image_staging_buffer_device_memory, 0, image_staging_buffer_device_memory_size, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(image_bytes.as_ptr(), data_ptr as *mut u8, image_bytes.len());
-        device.unmap_memory(texture_image_staging_buffer_device_memory);
-        }
-
-        // Create Image:
-        let (texture_image, texture_image_device_memory) = Renderer::create_image(
-            &device, &instance, physical_device, image_buffer.width(), image_buffer.height(), 
-            vk::Format::R8G8B8A8_SRGB, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL);       
-
-        let transition_image_layout = |cmd_buffer: vk::CommandBuffer, transition_image: vk::Image, 
-            old_layout: vk::ImageLayout, new_layout: vk::ImageLayout,
-            src_access_mask: vk::AccessFlags, dst_access_mask: vk::AccessFlags,
-            src_stage_mask: vk::PipelineStageFlags, dst_stage_mask: vk::PipelineStageFlags| {
-            let image_subresource_range = vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            };
-            let image_memory_barrier = vk::ImageMemoryBarrier{
-                s_type: vk::StructureType::IMAGE_MEMORY_BARRIER,
-                p_next: ptr::null(),
-                src_access_mask: src_access_mask,
-                dst_access_mask: dst_access_mask,
-                old_layout: old_layout,
-                new_layout: new_layout,
-                src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                image: transition_image,
-                subresource_range: image_subresource_range,
-            };
-            unsafe{device.cmd_pipeline_barrier(cmd_buffer,
-                src_stage_mask,
-                dst_stage_mask,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[image_memory_barrier]
-            )};
-        };
-
         let single_time_cmd_buffer_start = || -> (vk::CommandBuffer, vk::CommandPool){
             let cmd_pool_ci = vk::CommandPoolCreateInfo {
                 s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
@@ -897,6 +712,188 @@ impl Renderer {
             unsafe{device.destroy_command_pool(cmd_pool, None)};
         };
 
+        // CREATE BUFFERS AND ALLOCATE THEM:___________________________________________________________________________
+        let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
+        { // List all memory types and memory heaps:
+            for idx in 0..physical_device_memory_properties.memory_type_count as usize {
+                println!("[{idx}] {:?}", physical_device_memory_properties.memory_types[idx]);
+            }
+            for idx in 0..physical_device_memory_properties.memory_heap_count as usize {
+                println!("[{idx}] {:?}", physical_device_memory_properties.memory_heaps[idx]);
+            }
+        }
+
+        // VERTEX BUFFER:
+        let vertex_buffer_size = model.get_vertex_buffer_size();
+        let (vertex_staging_buffer, vertex_staging_buffer_device_memory) = 
+            Renderer::create_buffer(
+                &device, vertex_buffer_size,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, 
+                &graphics_queue_family_idx, &physical_device_memory_properties
+            );
+        // Copy actual RAM to VRAM by direct mapping:
+        unsafe {
+        let data_ptr = device.map_memory(vertex_staging_buffer_device_memory, 0, vertex_buffer_size, vk::MemoryMapFlags::empty()).unwrap();
+            std::ptr::copy_nonoverlapping(model.get_vertex_buffer_ptr(), data_ptr as *mut Vertex, model.vertices.len());
+        device.unmap_memory(vertex_staging_buffer_device_memory);
+        }
+        let (vertex_buffer, vertex_buffer_device_memory) = 
+            Renderer::create_buffer(
+                &device, vertex_buffer_size,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL, 
+                &graphics_queue_family_idx, &physical_device_memory_properties
+            );
+        let (single_time_cmd_buffer, single_time_cmd_pool) = single_time_cmd_buffer_start();
+        let vertices_copy_region = vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: vertex_buffer_size,
+        };
+        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, vertex_staging_buffer, vertex_buffer, &[vertices_copy_region])};        
+
+        // INDEX BUFFER:
+        let index_buffer_size = model.get_index_buffer_size();
+        let (index_staging_buffer, index_staging_buffer_device_memory) = 
+            Renderer::create_buffer(
+                &device, index_buffer_size,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                &graphics_queue_family_idx, &physical_device_memory_properties
+            );
+        unsafe {
+        let data_ptr = device.map_memory(index_staging_buffer_device_memory, 0, index_buffer_size, vk::MemoryMapFlags::empty()).unwrap();
+            std::ptr::copy_nonoverlapping(model.vertex_indices.as_ptr(), data_ptr as *mut IndicesType, model.vertex_indices.len());
+        device.unmap_memory(index_staging_buffer_device_memory);
+        }
+        let (index_buffer, index_buffer_device_memory) = 
+            Renderer::create_buffer(
+                &device, index_buffer_size,
+                vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::INDEX_BUFFER,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                &graphics_queue_family_idx, &physical_device_memory_properties
+            );
+        let indices_copy_region = vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: index_buffer_size,
+        };
+        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, index_staging_buffer, index_buffer, &[indices_copy_region])};
+
+        // End command buffer and submit it for execution.
+        single_time_cmd_buffer_end(single_time_cmd_buffer, single_time_cmd_pool);
+        // ________________________________________________________________________________________________________________
+        
+        // CREATE UNIFORM BUFFERS: ________________________________________________________________________________________
+        let uniform_buffer_size = std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize;
+        let mut uniform_buffers: Vec<vk::Buffer>  = Vec::with_capacity(frames_in_flight_count as usize);
+        let mut uniform_buffer_device_memories: Vec<vk::DeviceMemory>  = Vec::with_capacity(frames_in_flight_count as usize);
+        let mut uniform_buffer_mapped_memory_ptrs: Vec<*mut c_void> = Vec::with_capacity(frames_in_flight_count as usize);
+        for _ in 0..frames_in_flight_count {
+            let (uniform_buffer, uniform_buffer_device_memory) = 
+                Renderer::create_buffer(
+                    &device, uniform_buffer_size,
+                    vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                    &graphics_queue_family_idx, &physical_device_memory_properties
+                );
+
+            uniform_buffers.push(uniform_buffer);
+            uniform_buffer_device_memories.push(uniform_buffer_device_memory);
+            // Get persistent mapped memory pointers, since I am going to use it every frame:
+            uniform_buffer_mapped_memory_ptrs.push(
+                unsafe{device.map_memory(uniform_buffer_device_memory, 0, uniform_buffer_size, vk::MemoryMapFlags::empty())}.unwrap()
+            );
+        }
+        // ________________________________________________________________________________________________________________
+
+        // DEPTH IMAGES:___________________________________________________________________________________________________
+        let window_inner_size = window.inner_size();
+        
+        // Note: It is actually make more sense to create frame_in_flight_count amount of depth buffers, but for code simplicity,
+        // I do create swapchain_image_count amount for now:
+        let mut depth_images: Vec<vk::Image> = Vec::with_capacity(swapchain_image_count);
+        let mut depth_image_device_memories: Vec<vk::DeviceMemory> = Vec::with_capacity(swapchain_image_count);
+        let mut depth_image_views: Vec<vk::ImageView> = Vec::with_capacity(swapchain_image_count);
+        for _ in 0..swapchain_image_count {
+            // We do not access this image directly from CPU, so it does not need to be LINEAR tiling.
+            // If a direct mapping from CPU is needed, you could have used LINEAR tiling so, RAM and VRAM does not differ in layout. 
+            let (depth_image, depth_image_device_memory, depth_image_view) = 
+                Renderer::create_depth_image_and_view(&device, &instance, physical_device, window_inner_size, depth_format);
+
+            depth_images.push(depth_image);
+            depth_image_device_memories.push(depth_image_device_memory);
+            depth_image_views.push(depth_image_view);
+        }
+        // ________________________________________________________________________________________________________________
+
+        
+        // CREATE FRAMEBUFFER:_____________________________________________________________________________________________
+        // Info: Render passes operate in conjunction with framebuffers. Framebuffers represent a collection of
+        // specific memory attachments that a render pass instance uses.
+        let mut framebuffers : Vec<vk::Framebuffer> = Vec::with_capacity(swapchain_image_views.len());
+        for (idx, image_view) in swapchain_image_views.iter().enumerate() {
+            framebuffers.push(Renderer::create_framebuffer(&device, &[*image_view, depth_image_views[idx]], render_pass, window_inner_size));
+        }
+        // ________________________________________________________________________________________________________________
+
+        // LOAD IMAGE______________________________________________________________________________________________________
+        let image_reader = image::io::Reader::open("./images/viking_room.png").unwrap();
+        let image_buffer = image_reader.decode().unwrap().into_rgba8();
+        let image_bytes: Vec<u8> = image_buffer.bytes().map(|byte| {byte.unwrap()}).collect();
+
+        let texture_image_size = image_bytes.len() as vk::DeviceSize;
+        let (texture_image_staging_buffer, texture_image_staging_buffer_device_memory) =
+            Renderer::create_buffer(&device, texture_image_size as u64, vk::BufferUsageFlags::TRANSFER_SRC, 
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, 
+            &graphics_queue_family_idx, &physical_device_memory_properties);
+
+        unsafe{
+        let data_ptr = device.map_memory(texture_image_staging_buffer_device_memory, 0, texture_image_size, vk::MemoryMapFlags::empty()).unwrap();
+            std::ptr::copy_nonoverlapping(image_bytes.as_ptr(), data_ptr as *mut u8, texture_image_size as usize);
+        device.unmap_memory(texture_image_staging_buffer_device_memory);
+        }
+
+        // Create Image:
+        let (texture_image, texture_image_device_memory) = Renderer::create_image(
+            &device, &instance, physical_device, image_buffer.width(), image_buffer.height(), 
+            vk::Format::R8G8B8A8_SRGB, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL);       
+
+        let transition_image_layout = |cmd_buffer: vk::CommandBuffer, transition_image: vk::Image, 
+            old_layout: vk::ImageLayout, new_layout: vk::ImageLayout,
+            src_access_mask: vk::AccessFlags, dst_access_mask: vk::AccessFlags,
+            src_stage_mask: vk::PipelineStageFlags, dst_stage_mask: vk::PipelineStageFlags| {
+            let image_subresource_range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            let image_memory_barrier = vk::ImageMemoryBarrier{
+                s_type: vk::StructureType::IMAGE_MEMORY_BARRIER,
+                p_next: ptr::null(),
+                src_access_mask: src_access_mask,
+                dst_access_mask: dst_access_mask,
+                old_layout: old_layout,
+                new_layout: new_layout,
+                src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
+                image: transition_image,
+                subresource_range: image_subresource_range,
+            };
+            unsafe{device.cmd_pipeline_barrier(cmd_buffer,
+                src_stage_mask,
+                dst_stage_mask,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[image_memory_barrier]
+            )};
+        };
+
         let (single_time_cmd_buffer, single_time_cmd_pool) = single_time_cmd_buffer_start();
         // Copying from a buffer to image requires to change IMAGELAYOUT. So, first I need to set the layout by using memory barriers:
         transition_image_layout(single_time_cmd_buffer, texture_image, 
@@ -942,8 +939,6 @@ impl Renderer {
 
         // Create Texture Sampler:
         let physical_device_properties = unsafe{instance.get_physical_device_properties(physical_device)};
-        let format_props = unsafe{instance.get_physical_device_format_properties(physical_device, vk::Format::R8G8B8A8_SRGB)};
-        println!("format probs: {:?}", format_props);
         let texture_sampler_ci = vk::SamplerCreateInfo {
             s_type: vk::StructureType::SAMPLER_CREATE_INFO,
             p_next: ptr::null(),
@@ -975,7 +970,7 @@ impl Renderer {
             stage_flags: vk::ShaderStageFlags::VERTEX,
             p_immutable_samplers: ptr::null(),
         };  
-        let sampler_descriptor_set_layout_binding2 = vk::DescriptorSetLayoutBinding {
+        let sampler_descriptor_set_layout_binding = vk::DescriptorSetLayoutBinding {
             binding: 1,
             // COMBINED_IMAGE_SAMPLER combines image and sampler in a single descriptor.
             descriptor_type: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -983,7 +978,7 @@ impl Renderer {
             stage_flags: vk::ShaderStageFlags::FRAGMENT,
             p_immutable_samplers: ptr::null(),
         };
-        let bindings = [ub_descriptor_set_layout_binding, sampler_descriptor_set_layout_binding2];
+        let bindings = [ub_descriptor_set_layout_binding, sampler_descriptor_set_layout_binding];
         let descriptor_layout_ci = vk::DescriptorSetLayoutCreateInfo {
             s_type: vk::StructureType::DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             p_next: ptr::null(),
@@ -995,55 +990,57 @@ impl Renderer {
         // ________________________________________________________________________________________________________________
 
         // CREATE DESCRIPTOR POOL:_________________________________________________________________________________________
-        let descriptor_pool_size = vk::DescriptorPoolSize {
+        let ub_descriptor_pool_size = vk::DescriptorPoolSize {
             ty: vk::DescriptorType::UNIFORM_BUFFER,
             descriptor_count: frames_in_flight_count,
         };
-        let descriptor_pool_size2 = vk::DescriptorPoolSize {
+        let sampler_descriptor_pool_size = vk::DescriptorPoolSize {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             descriptor_count: frames_in_flight_count,
         };
-        let descriptor_pool_sizes = [descriptor_pool_size,descriptor_pool_size2];
+        let descriptor_pool_sizes = [ub_descriptor_pool_size, sampler_descriptor_pool_size];
         let descriptor_pool_ci = vk::DescriptorPoolCreateInfo {
             s_type: vk::StructureType::DESCRIPTOR_POOL_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::DescriptorPoolCreateFlags::empty(),
-            max_sets: frames_in_flight_count,
+            max_sets: frames_in_flight_count, // is the maximum number of descriptor sets that can be allocated from the pool.
             pool_size_count: descriptor_pool_sizes.len() as u32,
-            p_pool_sizes: descriptor_pool_sizes.as_ptr(),
+            p_pool_sizes: descriptor_pool_sizes.as_ptr(), // This is the total bytes that will be pre-allocated from this pool.
         };
         let descriptor_pool = unsafe{device.create_descriptor_pool(&descriptor_pool_ci, None)}.unwrap();
         // ________________________________________________________________________________________________________________
 
-        // ALLOCATE DESCRIPTOR SETS:_______________________________________________________________________________________
+        // ALLOCATE DESCRIPTOR SETS FROM THE POOL:_________________________________________________________________________
         // vk::DescriptorSetAllocateInfo needs matching number of descriptorsetlayout elements for descriptionsets.
-        let mut descriptor_set_layout_vec: Vec<vk::DescriptorSetLayout> = Vec::with_capacity(frames_in_flight_count as usize);
-        for _ in 0..frames_in_flight_count {
+        let descriptor_sets_alloc_count = frames_in_flight_count;
+        let mut descriptor_set_layout_vec: Vec<vk::DescriptorSetLayout> = Vec::with_capacity(descriptor_sets_alloc_count as usize);
+        for _ in 0..descriptor_sets_alloc_count {
             descriptor_set_layout_vec.push(descriptor_set_layout);
         }
         let descriptor_set_alloc_info = vk::DescriptorSetAllocateInfo {
             s_type: vk::StructureType::DESCRIPTOR_SET_ALLOCATE_INFO,
             p_next: ptr::null(),
             descriptor_pool: descriptor_pool,
-            descriptor_set_count: frames_in_flight_count,
-            p_set_layouts: descriptor_set_layout_vec.as_ptr(),
+            descriptor_set_count: descriptor_sets_alloc_count, // Allocates this many descriptor sets by...
+            p_set_layouts: descriptor_set_layout_vec.as_ptr(), // ...using these layouts. So you basically can combine different amount of...
+            // ...descriptor sets and descriptors arbitrarily! It's a little bit confusing matter at first.
         };
         let descriptor_sets = unsafe{device.allocate_descriptor_sets(&descriptor_set_alloc_info)}.unwrap();
 
         // Update descriptor buffers:
-        for frame_idx in 0..frames_in_flight_count as usize {
-           let descriptor_buffer_info = vk::DescriptorBufferInfo {
-                buffer: uniform_buffers[frame_idx],
-                offset: 0,
-                range: std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize//uniform_buffer_memory_sizes[frame_idx] as vk::DeviceSize,
-           };
-           let descriptor_image_info = vk::DescriptorImageInfo {
-                sampler: texture_image_sampler,
-                image_view: texture_image_view,
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-           };
+        for frame_idx in 0..descriptor_sets_alloc_count as usize {
+            let descriptor_ub_buffer_info = vk::DescriptorBufferInfo {
+                    buffer: uniform_buffers[frame_idx],
+                    offset: 0,
+                    range: std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize
+            };
+            let descriptor_image_info = vk::DescriptorImageInfo {
+                    sampler: texture_image_sampler,
+                    image_view: texture_image_view,
+                    image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            };
 
-            let write_descriptor_set = vk::WriteDescriptorSet {
+            let write_descriptor_set_ub = vk::WriteDescriptorSet {
                 s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
                 p_next: ptr::null(),
                 dst_set: descriptor_sets[frame_idx],
@@ -1053,10 +1050,10 @@ impl Renderer {
                 descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
                 // Only one of the pointers used below depending on the descriptor_type parameter above:
                 p_image_info: ptr::null(),
-                p_buffer_info: &descriptor_buffer_info,
+                p_buffer_info: &descriptor_ub_buffer_info,
                 p_texel_buffer_view: ptr::null(),
             };
-            let write_descriptor_set2 = vk::WriteDescriptorSet {
+            let write_descriptor_set_image_sampler = vk::WriteDescriptorSet {
                 s_type: vk::StructureType::WRITE_DESCRIPTOR_SET,
                 p_next: ptr::null(),
                 dst_set: descriptor_sets[frame_idx],
@@ -1069,7 +1066,7 @@ impl Renderer {
                 p_buffer_info: ptr::null(),
                 p_texel_buffer_view: ptr::null(),
             };
-            unsafe{device.update_descriptor_sets(&[write_descriptor_set, write_descriptor_set2], &[])};
+            unsafe{device.update_descriptor_sets(&[write_descriptor_set_ub, write_descriptor_set_image_sampler], &[])};
         }
         // ________________________________________________________________________________________________________________
 
@@ -1109,7 +1106,7 @@ impl Renderer {
             rasterizer_discard_enable: vk::FALSE, //
             polygon_mode: vk::PolygonMode::FILL,
             cull_mode: vk::CullModeFlags::BACK,
-            front_face: vk::FrontFace::CLOCKWISE,
+            front_face: vk::FrontFace::COUNTER_CLOCKWISE,
             // The rasterizer can alter the depth values by adding a constant value or biasing them based on a fragment's slope.
             depth_bias_enable: vk::FALSE,
             depth_bias_constant_factor: 0.0f32,
@@ -1257,23 +1254,12 @@ impl Renderer {
         let command_buffers = unsafe{device.allocate_command_buffers(&command_buffer_alloc_info)}.unwrap();
         //_________________________________________________________________________________________________________________
 
-        // Transfer VERTICES/INDICES FROM STAGING BUFFER TO DEVICE_LOCAL BUFFER:___________________________________________________
-        let (single_time_cmd_buffer, single_time_cmd_pool) = single_time_cmd_buffer_start();
-        let vertices_copy_region = vk::BufferCopy {
-            src_offset: 0,
-            dst_offset: 0,
-            size: vertex_buffer_staging_memory_size,
-        };
-        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, vertex_buffer_staging, vertex_buffer, &[vertices_copy_region])};
-        let indices_copy_region = vk::BufferCopy {
-            src_offset: 0,
-            dst_offset: 0,
-            size: index_buffer_staging_memory_size,
-        };
-        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, index_buffer_staging, index_buffer, &[indices_copy_region])};
-        single_time_cmd_buffer_end(single_time_cmd_buffer, single_time_cmd_pool);
-        //_________________________________________________________________________________________________________________
-        
+        let vk_index_type: vk::IndexType = vk::IndexType::UINT32;
+        { // A very ugly way of making sure that vk index type inside command buffers are correct.
+            let val1: IndicesType = 5;
+            let val2: u32 = 5;
+            debug_assert!(val1 == val2)
+        }
         Renderer {
             entry,
             instance,
@@ -1306,16 +1292,15 @@ impl Renderer {
             frames_in_flight_count,
             current_frame_in_flight_idx: 0,
 
-            vertices,
-            indices,
+            model,
             vertex_buffer,
-            vertex_buffer_staging,
+            vertex_staging_buffer,
             index_buffer,
-            index_buffer_staging,
+            index_staging_buffer,
             vertex_buffer_device_memory,
-            vertex_buffer_staging_device_memory,
+            vertex_staging_buffer_device_memory,
             index_buffer_device_memory,
-            index_buffer_staging_device_memory,
+            index_staging_buffer_device_memory,
             descriptor_set_layout,
 
             uniform_buffers,
@@ -1327,16 +1312,17 @@ impl Renderer {
             texture_image,
             texture_image_device_memory,
             texture_image_view,
-            texture_sampler: texture_image_sampler,
+            texture_image_sampler,
 
             depth_images,
             depth_image_device_memories,
             depth_image_views,
 
-            start_time: std::time::Instant::now()
+            start_time: std::time::Instant::now(),
+            vk_index_type
         }
     }
-    pub fn render_frame (&mut self, window_inner_size: winit::dpi::PhysicalSize<u32>) {
+    pub fn render_frame (&mut self, window_inner_size: winit::dpi::PhysicalSize<u32>, model_rotation: f32, model_scale: f32) {
         unsafe{self.device.wait_for_fences(&[self.queue_submit_finished_fences[self.current_frame_in_flight_idx]], true, u64::MAX)}.unwrap();
         unsafe{self.device.reset_fences(&[self.queue_submit_finished_fences[self.current_frame_in_flight_idx]])}.unwrap();
 
@@ -1407,8 +1393,8 @@ impl Renderer {
         // Update corresponding uniform buffer:
         let time_since_start = std::time::Instant::now() - self.start_time;
         let ubo = UniformBufferObject {
-            model: glam::Mat4::from_rotation_z(time_since_start.as_millis() as f32 / 1000.0f32),
-            view:  glam::Mat4::look_at_lh(glam::vec3(0.0, 1.5, 1.5), glam::vec3(0.0, 0.0, 0.0), glam::vec3(0.0, 0.0, -1.0)),     
+            model: glam::Mat4::from_rotation_z(model_rotation),//glam::Mat4::from_rotation_z(time_since_start.as_millis() as f32 / 1000.0f32),
+            view:  glam::Mat4::look_at_lh(glam::vec3(0.0, 1.25 * model_scale, 1.25 * model_scale), glam::vec3(0.0, 0.0, 0.0), glam::vec3(0.0, 0.0, -1.0)),     
             projection: glam::Mat4::perspective_lh(std::f32::consts::PI / 2.5f32, window_inner_size.width as f32 / window_inner_size.height as f32, 0.1, 100.0)
         };
         unsafe{
@@ -1430,10 +1416,11 @@ impl Renderer {
                 self.device.cmd_bind_pipeline(self.cmd_buffers[self.current_frame_in_flight_idx], 
                     vk::PipelineBindPoint::GRAPHICS, self.graphics_pipelines[0]);
                 self.device.cmd_bind_vertex_buffers(self.cmd_buffers[self.current_frame_in_flight_idx], 0, &[self.vertex_buffer], &[0]);
-                self.device.cmd_bind_index_buffer(self.cmd_buffers[self.current_frame_in_flight_idx], self.index_buffer, 0, vk::IndexType::UINT16);
+                
+                self.device.cmd_bind_index_buffer(self.cmd_buffers[self.current_frame_in_flight_idx], self.index_buffer, 0, self.vk_index_type);
                 self.device.cmd_bind_descriptor_sets(self.cmd_buffers[self.current_frame_in_flight_idx], 
                     vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.descriptor_sets[self.current_frame_in_flight_idx]], &[]);
-                self.device.cmd_draw_indexed(self.cmd_buffers[self.current_frame_in_flight_idx], self.indices.len() as u32, 1, 0, 0, 0);
+                self.device.cmd_draw_indexed(self.cmd_buffers[self.current_frame_in_flight_idx], self.model.vertex_indices.len() as u32, 1, 0, 0, 0);
             self.device.cmd_end_render_pass(self.cmd_buffers[self.current_frame_in_flight_idx]);
         self.device.end_command_buffer(self.cmd_buffers[self.current_frame_in_flight_idx]).unwrap();
         }
@@ -1504,6 +1491,58 @@ impl Renderer {
         };
     
         unsafe{instance.create_device(physical_device, &device_create_info, None).unwrap()}
+    }
+
+    fn create_buffer (device: &ash::Device, size: u64, usage: vk::BufferUsageFlags, 
+    required_memory_flags: vk::MemoryPropertyFlags, p_queue_family_indices: *const u32,
+    physical_device_memory_properties: &vk::PhysicalDeviceMemoryProperties)
+    -> (vk::Buffer, vk::DeviceMemory) {
+        let buffer_ci = vk::BufferCreateInfo {
+            s_type: vk::StructureType::BUFFER_CREATE_INFO,
+            p_next: ptr::null(),
+            flags: vk::BufferCreateFlags::empty(),
+            size: size,
+            usage: usage,
+            sharing_mode: vk::SharingMode::EXCLUSIVE,
+            queue_family_index_count: 1,
+            p_queue_family_indices: p_queue_family_indices,
+        };
+
+        let buffer = unsafe{device.create_buffer(&buffer_ci, None)}.unwrap();
+
+        let mut memory_type_idx = 0;
+        let buffer_memory_requirements = unsafe{device.get_buffer_memory_requirements(buffer)};
+        println!("Buffer supported memory type bits: {:b}", buffer_memory_requirements.memory_type_bits);
+        
+        // Find required memory type in memory types AND this is suitable for the newly created buffer memory requirements:
+        // Info: Host coherent memory does not need flushing or invalidating.
+        for (idx, physical_device_memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
+            if physical_device_memory_type.property_flags.contains(required_memory_flags) &&
+            ((1 << idx) & buffer_memory_requirements.memory_type_bits) == (1 << idx) {
+                memory_type_idx = idx;
+                break;
+            }
+        }
+        println!("found memory_type_idx: {}", memory_type_idx);
+        
+        // Info: "Each resource may need more memory than the requested size of a resource. It's because drivers may need 
+        // some additional meta-data to manage given resource. That's why we need to call vkGet...MemoryRequirements() 
+        // functions and allocate enough memory.But when we want to modify contents of a buffer or image we need to think 
+        // only about its size (the size we requested during resource creation), not the data size returned by the mentioned 
+        // functions."
+        let buffer_mem_alloc_info = vk::MemoryAllocateInfo {
+            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
+            p_next: ptr::null(),
+            // Note: Actual VRAM size might be different from RAM memory, cuz of alignments(I guess).
+            allocation_size: buffer_memory_requirements.size,
+            memory_type_index: memory_type_idx as u32,
+        };
+        let buffer_device_memory = unsafe{device.allocate_memory(&buffer_mem_alloc_info, None)}.unwrap();
+        
+        // Need to bind them too! This way, you can have more than one buffers that can be bound to a single device memory via offsets.
+        unsafe{device.bind_buffer_memory(buffer, buffer_device_memory, 0)}.unwrap();
+
+        (buffer, buffer_device_memory) 
     }
 
     fn create_image_view(device: &ash::Device, image: vk::Image, surface_format: vk::Format, 
@@ -1745,9 +1784,9 @@ impl Drop for Renderer {
         self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
         self.device.destroy_pipeline_layout(self.pipeline_layout, None);
         self.device.destroy_buffer(self.vertex_buffer, None);
-        self.device.destroy_buffer(self.vertex_buffer_staging, None);
+        self.device.destroy_buffer(self.vertex_staging_buffer, None);
         self.device.destroy_buffer(self.index_buffer, None);
-        self.device.destroy_buffer(self.index_buffer_staging, None);
+        self.device.destroy_buffer(self.index_staging_buffer, None);
         for buffer in &self.uniform_buffers {
             self.device.destroy_buffer(*buffer, None);
         }
@@ -1756,9 +1795,9 @@ impl Drop for Renderer {
             self.device.destroy_image(*depth_image, None);
         }
         self.device.free_memory(self.vertex_buffer_device_memory, None);
-        self.device.free_memory(self.vertex_buffer_staging_device_memory, None);
+        self.device.free_memory(self.vertex_staging_buffer_device_memory, None);
         self.device.free_memory(self.index_buffer_device_memory, None);
-        self.device.free_memory(self.index_buffer_staging_device_memory, None);
+        self.device.free_memory(self.index_staging_buffer_device_memory, None);
         self.device.free_memory(self.texture_image_device_memory, None);
         for depth_image_device_memory in &self.depth_image_device_memories {
             self.device.free_memory(*depth_image_device_memory, None);
@@ -1775,7 +1814,7 @@ impl Drop for Renderer {
         for image_view in &self.swapchain_image_views {
             self.device.destroy_image_view(*image_view, None);
         }
-        self.device.destroy_sampler(self.texture_sampler, None);
+        self.device.destroy_sampler(self.texture_image_sampler, None);
         self.device.destroy_image_view(self.texture_image_view, None);
         for depth_image_view in &self.depth_image_views {
             self.device.destroy_image_view(*depth_image_view, None);
@@ -1786,6 +1825,6 @@ impl Drop for Renderer {
         self.device.destroy_device(None);
         self.instance.destroy_instance(None);
         }
-        println!("Renderer is dropped!");
+        println!("Renderer has been dropped!");
     }
 }

@@ -10,10 +10,12 @@ ash = "0.37.2"
 winit = "0.28.2"
 glam = "0.23.0"
 image = "0.24.6"
+obj = "0.10.2"
 
 [lib]
+name = "hanokei_lib"
 path = "src/lib/lib.rs"
 
 [[bin]]
-name = "app"
+name = "hanokei_app"
 path = "src/main.rs"
