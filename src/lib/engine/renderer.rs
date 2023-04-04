@@ -59,13 +59,9 @@ pub struct Renderer {
 
     pub model: model::Model,
     pub vertex_buffer: vk::Buffer,
-    pub vertex_staging_buffer: vk::Buffer,
     pub index_buffer: vk::Buffer,
-    pub index_staging_buffer: vk::Buffer,
     pub vertex_buffer_device_memory: vk::DeviceMemory,
-    pub vertex_staging_buffer_device_memory: vk::DeviceMemory,
     pub index_buffer_device_memory: vk::DeviceMemory,
-    pub index_staging_buffer_device_memory: vk::DeviceMemory,
     pub descriptor_set_layout: vk::DescriptorSetLayout,
  
     pub uniform_buffers: Vec<vk::Buffer>,
@@ -380,7 +376,11 @@ impl Renderer {
             dst_offset: 0,
             size: vertex_buffer_size,
         };
-        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, vertex_staging_buffer, vertex_buffer, &[vertices_copy_region])};        
+        unsafe{
+            device.cmd_copy_buffer(single_time_cmd_buffer, vertex_staging_buffer, vertex_buffer, &[vertices_copy_region]);
+            device.destroy_buffer(vertex_staging_buffer, None);
+            device.free_memory(vertex_staging_buffer_device_memory, None);
+        }     
 
         // INDEX BUFFER:
         let index_buffer_size = model.get_index_buffer_size();
@@ -405,7 +405,11 @@ impl Renderer {
             dst_offset: 0,
             size: index_buffer_size,
         };
-        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, index_staging_buffer, index_buffer, &[indices_copy_region])};
+        unsafe{
+            device.cmd_copy_buffer(single_time_cmd_buffer, index_staging_buffer, index_buffer, &[indices_copy_region]);
+            device.destroy_buffer(index_staging_buffer, None);
+            device.free_memory(index_staging_buffer_device_memory, None);
+        }
 
         // End command buffer and submit it for execution.
         Renderer::single_time_cmd_buffer_end(&device, graphics_queue, single_time_cmd_buffer, single_time_cmd_pool);
@@ -861,13 +865,9 @@ impl Renderer {
 
             model,
             vertex_buffer,
-            vertex_staging_buffer,
             index_buffer,
-            index_staging_buffer,
             vertex_buffer_device_memory,
-            vertex_staging_buffer_device_memory,
             index_buffer_device_memory,
-            index_staging_buffer_device_memory,
             descriptor_set_layout,
 
             uniform_buffers,
@@ -1096,9 +1096,7 @@ impl Drop for Renderer {
         self.device.destroy_descriptor_set_layout(self.descriptor_set_layout, None);
         self.device.destroy_pipeline_layout(self.pipeline_layout, None);
         self.device.destroy_buffer(self.vertex_buffer, None);
-        self.device.destroy_buffer(self.vertex_staging_buffer, None);
         self.device.destroy_buffer(self.index_buffer, None);
-        self.device.destroy_buffer(self.index_staging_buffer, None);
         for buffer in &self.uniform_buffers {
             self.device.destroy_buffer(*buffer, None);
         }
@@ -1107,9 +1105,7 @@ impl Drop for Renderer {
             self.device.destroy_image(*depth_image, None);
         }
         self.device.free_memory(self.vertex_buffer_device_memory, None);
-        self.device.free_memory(self.vertex_staging_buffer_device_memory, None);
         self.device.free_memory(self.index_buffer_device_memory, None);
-        self.device.free_memory(self.index_staging_buffer_device_memory, None);
         self.device.free_memory(self.texture_image_device_memory, None);
         for depth_image_device_memory in &self.depth_image_device_memories {
             self.device.free_memory(*depth_image_device_memory, None);
