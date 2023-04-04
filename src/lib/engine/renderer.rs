@@ -1,338 +1,28 @@
-use std::{ffi::{CStr, CString, c_void}, io::Read};
+use std::{ffi::{CString, c_void}, io::Read};
 use winit::{dpi, platform::windows::WindowExtWindows, };
 use std::ptr;
-use ash::{vk::{self, Bool32}, extensions};
+use ash::{vk::{self}, extensions};
+use super::model;
+mod device;
+mod commandbuffer;
+mod swapchain;
+mod buffer;
+mod image;
+mod framebuffer;
+mod utilities;
+extern crate image as img;
 
-type IndicesType = u32;
-
-/// Returns **required** instance extension names.
-/// Note: There are 2 types of extensions: Device and Instance. You pass extensions to 
-/// corresponding type in DeviceCreateInfo or InstanceCreateInfo.
-fn get_instance_extension_names(entry: &ash::Entry) -> Vec<*const i8> {
-     let wanted_extension_names = vec![
-        extensions::khr::Surface::name(),
-        #[cfg(all(windows))]
-        extensions::khr::Win32Surface::name(),
-        #[cfg(debug_assertions)]
-        extensions::ext::DebugUtils::name(), 
-    ];
-    
-    // Check supporting:
-    let available_instance_ext_props = entry.enumerate_instance_extension_properties(None).unwrap();
-    for wanted_ext_name in &wanted_extension_names {
-        let mut found = false;
-        for ext_property in &available_instance_ext_props {
-            let ext_property_name = unsafe{CStr::from_ptr(ext_property.extension_name.as_ptr())};
-            if *wanted_ext_name == ext_property_name {
-                println!("Wanted Instance extension: '{}' is available.", ext_property_name.to_str().unwrap());
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            panic!("The required instance extension: '{}' is not found!", wanted_ext_name.to_str().unwrap());
-        }
-    }
-
-    // Convert CStr elements to *const i8 elements.
-    let p_wanted_extension_names = wanted_extension_names.iter().map(|e| {e.as_ptr()}).collect();
-    p_wanted_extension_names
-}
-
-/// Returns **required** instance layer names.
-/// 
-/// Note: This should return a CString, so the caller can create pointers to names. Otherwise, 
-/// pointers becomes dangling because CString created inside this function does not live long enough. 
-/// 
-/// Note: There are only layers for Instances; Device layers are deprecated.
-fn get_instance_layer_names(entry: &ash::Entry) -> Vec<CString> {
-    let wanted_layer_names: Vec<CString> = vec![
-        #[cfg(debug_assertions)]
-        CString::new("VK_LAYER_KHRONOS_validation").unwrap()
-    ];
-    
-    // Check supporting:
-    let available_instance_layer_properties = entry.enumerate_instance_layer_properties().unwrap();
-    for wanted_layer_name in &wanted_layer_names {
-        let mut found = false;
-        for layer_property in &available_instance_layer_properties {
-            let layer_property_name = unsafe{CStr::from_ptr(layer_property.layer_name.as_ptr())};
-            if wanted_layer_name.as_c_str() == layer_property_name {
-                println!("Wanted Layer: '{}' is available.", layer_property_name.to_str().unwrap());
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            panic!("The required instance layer: '{}' is not found!", wanted_layer_name.to_str().unwrap());
-        }
-    }    
-
-    wanted_layer_names
-}
-
-fn get_device_extension_names(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Vec<*const i8> {
-    let wanted_device_ext_names = vec![
-        extensions::khr::Swapchain::name().as_ptr()
-        ];
-
-    let available_device_ext_props = 
-        unsafe{instance.enumerate_device_extension_properties(physical_device)}.unwrap();
-    for wanted_device_ext_name in &wanted_device_ext_names {
-        let mut found = false;
-        let wanted_device_ext_name_cstr = unsafe{CStr::from_ptr(*wanted_device_ext_name)};
-        for device_ext_props in &available_device_ext_props {
-            let layer_property_name = unsafe{CStr::from_ptr(device_ext_props.extension_name.as_ptr())};
-            if wanted_device_ext_name_cstr == layer_property_name {
-                println!("Wanted Device Extension: '{}' is available.", layer_property_name.to_str().unwrap());
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            panic!("The required device extension: '{}' is not found!", wanted_device_ext_name_cstr.to_str().unwrap());
-        }
-    }
-
-    wanted_device_ext_names
-}
-
-#[cfg(debug_assertions)]#[allow(dead_code)]
-fn list_physical_device_properties_and_features(instance : &ash::Instance, physical_device : ash::vk::PhysicalDevice) {
-    let properties = unsafe {instance.get_physical_device_properties(physical_device)};
-    println!("---Properties:\n{:?}", properties);
-    let features = unsafe{instance.get_physical_device_features(physical_device)};
-    println!("---Features:\n{:?}", features);
-}
-
-fn get_debug_utils_messenger_create_info() -> vk::DebugUtilsMessengerCreateInfoEXT {
-    vk::DebugUtilsMessengerCreateInfoEXT {
-        s_type: vk::StructureType::DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-        p_next: ptr::null(),
-        flags: vk::DebugUtilsMessengerCreateFlagsEXT::empty(),
-        message_severity:   vk::DebugUtilsMessageSeverityFlagsEXT::WARNING | 
-                            //vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE |
-                            //vk::DebugUtilsMessageSeverityFlagsEXT::INFO |
-                            vk::DebugUtilsMessageSeverityFlagsEXT::ERROR,
-        message_type:   vk::DebugUtilsMessageTypeFlagsEXT::GENERAL |
-                        vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE |
-                        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION,
-        pfn_user_callback: Some(debug_utils_callback),
-        p_user_data: std::ptr::null_mut(),
-    }
-}
-
-/// This function will be called back by debug_utils_messenger.
-/// Debug_utils_messenger_create_info is passed to instance_create_info's pNext to be created.
-unsafe extern "system" fn debug_utils_callback (
-message_severity: vk::DebugUtilsMessageSeverityFlagsEXT, message_types: vk::DebugUtilsMessageTypeFlagsEXT,
-p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT, _p_user_data: *mut c_void) -> Bool32 {
-    let severity_str = match message_severity {
-        vk::DebugUtilsMessageSeverityFlagsEXT::ERROR => {"[ERROR]"},
-        vk::DebugUtilsMessageSeverityFlagsEXT::WARNING => {"[WARNING]"},
-        vk::DebugUtilsMessageSeverityFlagsEXT::INFO => {"[INFO]"},
-        vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE => {"[VERBOSE]"},
-        _ => {"[UNKNOWN SEVERITY]"}
-    };
-    let type_str = match message_types {
-        vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION => {"[VALIDATION]"},
-        vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE => {"[PERFORMANCE]"},
-        vk::DebugUtilsMessageTypeFlagsEXT::GENERAL => {"[GENERAL]"},
-        vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING => {"[DEVICE_ADDRESS_BINDING]"},
-        _ => {"[UNKNOWN TYPE]"}
-    };
-
-    let msg_str = CStr::from_ptr((*p_callback_data).p_message).to_str().unwrap();
-    println!("{}{}:{}", severity_str, type_str, msg_str);
-
-    ash::vk::FALSE // Should always return false by app, other values are reserved for vulkan layer development.
-}
-
-fn get_physical_device(instance: &ash::Instance) -> vk::PhysicalDevice {
-    let physical_devices = unsafe{instance.enumerate_physical_devices()}.unwrap();
-    println!("There is '{}' physical device(s).", physical_devices.len());
-    let physical_device = physical_devices[0]; // TODO: Just using the first one for now. Change it later.
-    // list_physical_device_properties_and_features(&instance, &physical_device);
-    physical_device
-}
-
-/// This is the **index** of graphics queue family inside the array returned from vkGetPhysicalDeviceQueueFamilyProperties.
-/// GRAPHICS QUEUE always can do TRANSFER operations, even if it does not say the GRAPHICS QUEUE has TRANSFER_BIT.
-fn get_graphics_queue_family_idx(instance: &ash::Instance, physical_device: vk::PhysicalDevice, 
-surface_loader: &extensions::khr::Surface, surface: &vk::SurfaceKHR) -> u32 {
-    let available_queue_family_props = 
-        unsafe{instance.get_physical_device_queue_family_properties(physical_device)};
-
-        println!("\nPhysical device queue family properties:\n{available_queue_family_props:?}\n");
-
-    for (queue_family_idx, queue_family_prop) in available_queue_family_props.iter().enumerate() {
-        if queue_family_prop.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
-            let has_presentation_support = unsafe{
-                surface_loader.get_physical_device_surface_support(physical_device, queue_family_idx as u32, *surface)
-            }.unwrap();
-            let has_transfer_support = queue_family_prop.queue_flags.contains(vk::QueueFlags::TRANSFER);
-            if has_presentation_support && has_transfer_support {
-                println!("Found the GRAPHICS queue family with presentation support and transfer support at index: '{}'",
-                     queue_family_idx);
-                return queue_family_idx as u32;
-            }
-        }
-    }
-
-    panic!("Could not found GRAPHICS queue family index!");
-}
-
-
-
-fn get_surface_format_and_color_space(surface_loader: &extensions::khr::Surface, physical_device: vk::PhysicalDevice, 
-surface: vk::SurfaceKHR) -> (vk::Format, vk::ColorSpaceKHR) {
-    let wanted_format = vk::Format::B8G8R8A8_SRGB;
-    let wanted_color_space = vk::ColorSpaceKHR::SRGB_NONLINEAR;
-
-    let surface_formats = unsafe {
-        surface_loader.get_physical_device_surface_formats(physical_device, surface)
-    }.unwrap();        
-    
-    for surface_format in &surface_formats {
-        if surface_format.format == wanted_format && surface_format.color_space == wanted_color_space {
-            println!("Wanted format: '{:?}' and color space: '{:?}' is supported by the physical device.", wanted_format, wanted_color_space);
-            return (wanted_format, wanted_color_space);
-        }
-    }
-    panic!("Wanted format and color space is not supported by physical device!");
-}
-
-fn get_present_mode(surface_loader: &extensions::khr::Surface, physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR) 
--> vk::PresentModeKHR {
-    let wanted_present_mode = vk::PresentModeKHR::IMMEDIATE;
-
-    let surface_present_modes =
-         unsafe{surface_loader.get_physical_device_surface_present_modes(physical_device, surface)}.unwrap();
-    for present_mode in &surface_present_modes {
-        if *present_mode == wanted_present_mode {
-            println!("Wanted present mode: '{:?}' is available.", wanted_present_mode);
-            return wanted_present_mode
-        }
-    }
-    panic!("Wanted present mode: '{:?}' is not available!", wanted_present_mode);
-}
-
-fn get_swapchain_min_image_count(wanted_image_count: u32, surface_loader: &extensions::khr::Surface, 
-physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR, ) -> u32 {
-    let capabilities = 
-        unsafe{surface_loader.get_physical_device_surface_capabilities(physical_device, surface)}.unwrap();
-    if wanted_image_count >= capabilities.min_image_count && wanted_image_count <= capabilities.max_image_count {
-        println!("swapchain minimum required image count is: '{}'", wanted_image_count);
-        return wanted_image_count;
-    }
-    panic!("Wanted minimum swapchain image count is out of bounds of swapchain can have!");
-}
-
-fn get_pre_transform_and_composite_alpha(surface_loader: &extensions::khr::Surface, 
-physical_device: vk::PhysicalDevice, surface: vk::SurfaceKHR)
--> (vk::SurfaceTransformFlagsKHR, vk::CompositeAlphaFlagsKHR) {
-    let capabilities = 
-        unsafe{surface_loader.get_physical_device_surface_capabilities(physical_device, surface)}.unwrap();
-    println!("'{:?}' is selected as pre_transform and '{:?}' is selected as composite_alpha", 
-        capabilities.current_transform, capabilities.supported_composite_alpha);
-
-    (capabilities.current_transform, capabilities.supported_composite_alpha)
-}
 #[repr(C)]
-#[derive(Debug)]
-struct Vertex {
-    pos: glam::Vec3,
-    uv:  glam::Vec2,
-}
-
-pub struct Model {
-    vertices:       Vec<Vertex>,
-    vertex_indices: Vec<IndicesType>, 
-}
-
-impl Model {
-    fn new (model_file_path: &str) -> Model {
-        let obj = obj::Obj::load(model_file_path).unwrap();
-        
-        let vertex_positions: Vec<glam::Vec3> = obj.data.position.iter().map(|pos| {glam::Vec3::from_array(*pos)}).collect();
-        let vertex_uvs: Vec<glam::Vec2> = obj.data.texture.iter().map(|uv| {
-            // ".obj" files need this operation on 'v-axis' to become compatible with vulkan.
-            glam::Vec2::from_array([uv[0], 1.0f32 - uv[1]])
-        }).collect();
-
-        let mut unique_index_tuples: Vec<(usize, usize)> = Vec::new();
-        // Each poly has 3 index_types.
-        let polys = &obj.data.objects[0].groups[0].polys;
-        let triangle_count = polys.len() * 3;
-        let mut vertex_indices: Vec<IndicesType> = Vec::with_capacity(triangle_count);
-        for  poly in polys {
-            // Index tuple has: (vertex position index, vertex uv index, vertex normal index).
-            for index_tuple in &poly.0 {
-                let as_tuple = (index_tuple.0, index_tuple.1.unwrap());
-                if unique_index_tuples.contains(&as_tuple) {
-                    let idx = unique_index_tuples.iter().position(|elem| {*elem == as_tuple}).unwrap();
-                    vertex_indices.push(idx as IndicesType);
-                } else {
-                    unique_index_tuples.push(as_tuple);
-                    vertex_indices.push((unique_index_tuples.len() - 1) as IndicesType);
-                }
-            }
-        }
-        
-        println!("There are {} vertex_positions.", vertex_positions.len());
-        println!("There are {} vertex_uvs", vertex_uvs.len());
-        println!("Found     {} unique vertices from vertex_positions and vertex_uvs.", unique_index_tuples.len());
-        println!("There are {} triangles.", triangle_count);
-        println!("There are {} vertex_indices.", vertex_indices.len());
-
-        let mut vertices: Vec<Vertex> = Vec::with_capacity(unique_index_tuples.len());
-        for unique_index_tuple in unique_index_tuples {
-            vertices.push(Vertex { 
-                pos: vertex_positions[unique_index_tuple.0],
-                uv: vertex_uvs[unique_index_tuple.1]
-                })
-        }
-
-        Model {
-            vertices,
-            vertex_indices,
-        }
-    }
-    #[inline]
-    fn get_vertex_input_binding_stride () -> u32 {
-        std::mem::size_of::<Vertex>() as u32
-    }
-    #[inline]
-    fn get_vertex_buffer_size(&self) -> vk::DeviceSize {
-        (self.vertices.len() * Model::get_vertex_input_binding_stride() as usize) as u64
-    }
-    #[inline]
-    fn get_vertex_buffer_ptr(&self) -> *const Vertex {
-        self.vertices.as_ptr()
-    }
-    #[inline]
-    fn get_index_buffer_size (&self) -> vk::DeviceSize {
-        (self.vertex_indices.len() * std::mem::size_of::<IndicesType>()) as u64
-    }
+pub struct Vertex {
+    pub pos: glam::Vec3,
+    pub uv:  glam::Vec2,
 }
 
 #[repr(C)]
-struct UniformBufferObject {
+pub struct UniformBufferObject {
     model:       glam::Mat4,
     view:        glam::Mat4,
     projection:  glam::Mat4,    
-}
-
-pub struct SwapchainCreationNeeds<'a> {
-    surface_format: vk::Format,
-    surface_color_space: vk::ColorSpaceKHR,
-    surface_pre_transform: vk::SurfaceTransformFlagsKHR,
-    surface_composite_alpha: vk::CompositeAlphaFlagsKHR,
-    surface_present_mode: vk::PresentModeKHR,
-    swapchain_min_image_count: u32,
-    surface: vk::SurfaceKHR,
-    window_inner_size: dpi::PhysicalSize<u32>,
-    swapchain_loader: &'a extensions::khr::Swapchain,
 }
 
 pub struct Renderer {
@@ -367,7 +57,7 @@ pub struct Renderer {
     pub frames_in_flight_count: u32,
     pub current_frame_in_flight_idx: usize,
 
-    pub model: Model,
+    pub model: model::Model,
     pub vertex_buffer: vk::Buffer,
     pub vertex_staging_buffer: vk::Buffer,
     pub index_buffer: vk::Buffer,
@@ -380,7 +70,7 @@ pub struct Renderer {
  
     pub uniform_buffers: Vec<vk::Buffer>,
     pub uniform_buffer_device_memories: Vec<vk::DeviceMemory>, 
-    pub uniform_buffer_mapped_memory_ptrs: Vec<*mut c_void>,
+    pub uniform_buffer_mapped_memory_ptrs: Vec<*mut UniformBufferObject>,
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
 
@@ -393,13 +83,11 @@ pub struct Renderer {
     depth_image_device_memories: Vec<vk::DeviceMemory>,
     depth_image_views: Vec<vk::ImageView>,
 
-    pub start_time: std::time::Instant,
-    vk_index_type: vk::IndexType,
 }
 
 impl Renderer {
     pub fn new(window: &winit::window::Window, frames_in_flight_count: u32) -> Renderer {
-        let model = Model::new("models/viking_room.obj");
+        let model = model::Model::new("models/viking_room.obj");
 
         let entry = unsafe {ash::Entry::load().unwrap()};
         // CREATE APP INFO:________________________________________________________________________________________________
@@ -417,16 +105,16 @@ impl Renderer {
         // ________________________________________________________________________________________________________________
         
         // CREATE INSTANCE:________________________________________________________________________________________________
-        let instance_ext_names = get_instance_extension_names(&entry);
+        let instance_ext_names = utilities::get_instance_extension_names(&entry);
         // Note: val_layer_names variable must be created here just to extend the lifetimes of CStrings inside Vector.
         // Otherwise, pointers become dangling.
-        let val_layer_names = get_instance_layer_names(&entry); 
+        let val_layer_names = utilities::get_instance_layer_names(&entry); 
         let p_val_layer_names: Vec<*const i8> = val_layer_names.iter().map(|value| {value.as_ptr()}).collect();
 
         let instance_ci = vk::InstanceCreateInfo {
             s_type: vk::StructureType::INSTANCE_CREATE_INFO,
             p_next: if cfg!(debug_assertions) {
-                &get_debug_utils_messenger_create_info() as *const vk::DebugUtilsMessengerCreateInfoEXT as *const c_void
+                &utilities::get_debug_utils_messenger_create_info() as *const vk::DebugUtilsMessengerCreateInfoEXT as *const c_void
             } else {ptr::null()},
             flags: vk::InstanceCreateFlags::empty(),
             p_application_info: &app_info,
@@ -456,23 +144,24 @@ impl Renderer {
 
         // FROM A PHYSICAL DEVICE CREATE A LOGICAL DEVICE. FIND GRAPHICS QUEUE IDX:________________________________________
         let surface_loader = extensions::khr::Surface::new(&entry, &instance);
-        let physical_device = get_physical_device(&instance);
-        let graphics_queue_family_idx = get_graphics_queue_family_idx(&instance, physical_device, &surface_loader, &win32_surface);
+        let physical_device = utilities::get_physical_device(&instance);
+        let graphics_queue_family_idx = utilities::get_graphics_queue_family_idx(&instance, physical_device, &surface_loader, &win32_surface);
         let device = Renderer::create_device(&instance, physical_device, graphics_queue_family_idx);
         let graphics_queue = unsafe{device.get_device_queue(graphics_queue_family_idx, 0)};
         // ________________________________________________________________________________________________________________
         
         // CREATE SWAPCHAIN:_______________________________________________________________________________________________
         let (surface_format, surface_color_space) = 
-            get_surface_format_and_color_space(&surface_loader, physical_device, win32_surface);
+            utilities::get_surface_format_and_color_space(&surface_loader, physical_device, win32_surface);
         let (surface_pre_transform, surface_composite_alpha) = 
-            get_pre_transform_and_composite_alpha(&surface_loader, physical_device, win32_surface);
-        let surface_present_mode = get_present_mode(&surface_loader, physical_device, win32_surface);
+            utilities::get_pre_transform_and_composite_alpha(&surface_loader, physical_device, win32_surface);
+        let surface_present_mode = utilities::get_present_mode(&surface_loader, physical_device, win32_surface);
         let swapchain_min_image_count = 
-            get_swapchain_min_image_count(frames_in_flight_count, &surface_loader, physical_device, win32_surface);
+            utilities::get_swapchain_min_image_count(frames_in_flight_count, &surface_loader, physical_device, win32_surface);
 
         let swapchain_loader = extensions::khr::Swapchain::new(&instance, &device);
-        let swapchain_needs = SwapchainCreationNeeds {
+        let window_inner_size = window.inner_size();
+        let swapchain_needs = swapchain::SwapchainCreationNeeds {
             surface_format,
             surface_color_space,
             surface_pre_transform,
@@ -480,7 +169,7 @@ impl Renderer {
             surface_present_mode,
             swapchain_min_image_count,
             surface: win32_surface,
-            window_inner_size: window.inner_size(),
+            window_inner_size,
             swapchain_loader: &swapchain_loader,
         };
         
@@ -641,7 +330,7 @@ impl Renderer {
         // VERTEX CREATION AND BINDING DESC & ATTRIBUTE DESCS:__________________________________________________________________
         let vertex_input_binding_desc = vk::VertexInputBindingDescription {
             binding: 0,
-            stride: Model::get_vertex_input_binding_stride(),
+            stride: model::Model::get_vertex_input_binding_stride(),
             input_rate: vk::VertexInputRate::VERTEX,
         };
         let vertex_input_binding_descriptions = [vertex_input_binding_desc];
@@ -661,67 +350,9 @@ impl Renderer {
         let vertex_input_attribute_descriptions = [vertex_input_pos_attribute_desc, vertex_input_uv_attribute_desc];
         // ________________________________________________________________________________________________________________
 
-        
-        let single_time_cmd_buffer_start = || -> (vk::CommandBuffer, vk::CommandPool){
-            let cmd_pool_ci = vk::CommandPoolCreateInfo {
-                s_type: vk::StructureType::COMMAND_POOL_CREATE_INFO,
-                p_next: ptr::null(),
-                flags: vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
-                queue_family_index: graphics_queue_family_idx, // GRAPHICS implicitly supports TRANSFER.
-            };
-            let cmd_pool = unsafe{device.create_command_pool(&cmd_pool_ci, None)}.unwrap();
-            
-            let cmd_buffer_alloc_info = vk::CommandBufferAllocateInfo{
-                s_type: vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO,
-                p_next: ptr::null(),
-                command_pool: cmd_pool,
-                level: vk::CommandBufferLevel::PRIMARY,
-                command_buffer_count: 1,
-            };
-            let cmd_buffer = unsafe{device.allocate_command_buffers(&cmd_buffer_alloc_info)}.unwrap()[0];
-            
-            let cmd_buffer_begin_info = vk::CommandBufferBeginInfo {
-                s_type: vk::StructureType::COMMAND_BUFFER_BEGIN_INFO,
-                p_next: ptr::null(),
-                flags: vk::CommandBufferUsageFlags::empty(),
-                p_inheritance_info: ptr::null(),
-            };
-            unsafe{device.begin_command_buffer(cmd_buffer, &cmd_buffer_begin_info).unwrap()};
-            
-            (cmd_buffer, cmd_pool)
-        };
-        let single_time_cmd_buffer_end = |cmd_buffer: vk::CommandBuffer, cmd_pool: vk::CommandPool| {
-            unsafe{
-            device.end_command_buffer(cmd_buffer).unwrap();
-            }
-            let submit_info = vk::SubmitInfo {
-                s_type: vk::StructureType::SUBMIT_INFO,
-                p_next: ptr::null(),
-                wait_semaphore_count: 0,
-                p_wait_semaphores: ptr::null(),
-                p_wait_dst_stage_mask: ptr::null(),
-                command_buffer_count: 1,
-                p_command_buffers: &cmd_buffer,
-                signal_semaphore_count: 0,
-                p_signal_semaphores: ptr::null(),
-            };
-            unsafe{device.queue_submit(graphics_queue, &[submit_info], vk::Fence::null()).unwrap()};
-            
-            // Wait idle before destroying to let it be done with its job.
-            unsafe{device.queue_wait_idle(graphics_queue).unwrap()};
-            unsafe{device.destroy_command_pool(cmd_pool, None)};
-        };
-
         // CREATE BUFFERS AND ALLOCATE THEM:___________________________________________________________________________
         let physical_device_memory_properties = unsafe{instance.get_physical_device_memory_properties(physical_device)};
-        { // List all memory types and memory heaps:
-            for idx in 0..physical_device_memory_properties.memory_type_count as usize {
-                println!("[{idx}] {:?}", physical_device_memory_properties.memory_types[idx]);
-            }
-            for idx in 0..physical_device_memory_properties.memory_heap_count as usize {
-                println!("[{idx}] {:?}", physical_device_memory_properties.memory_heaps[idx]);
-            }
-        }
+        utilities::print_all_memory_types_and_memory_heaps(&physical_device_memory_properties);
 
         // VERTEX BUFFER:
         let vertex_buffer_size = model.get_vertex_buffer_size();
@@ -733,11 +364,8 @@ impl Renderer {
                 &graphics_queue_family_idx, &physical_device_memory_properties
             );
         // Copy actual RAM to VRAM by direct mapping:
-        unsafe {
-        let data_ptr = device.map_memory(vertex_staging_buffer_device_memory, 0, vertex_buffer_size, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(model.get_vertex_buffer_ptr(), data_ptr as *mut Vertex, model.vertices.len());
-        device.unmap_memory(vertex_staging_buffer_device_memory);
-        }
+        Renderer::copy_host_data_to_device_buffer(&device, vertex_staging_buffer_device_memory, vertex_buffer_size, 
+            model.vertices.as_ptr(), model.vertices.len());
         let (vertex_buffer, vertex_buffer_device_memory) = 
             Renderer::create_buffer(
                 &device, vertex_buffer_size,
@@ -745,7 +373,8 @@ impl Renderer {
                 vk::MemoryPropertyFlags::DEVICE_LOCAL, 
                 &graphics_queue_family_idx, &physical_device_memory_properties
             );
-        let (single_time_cmd_buffer, single_time_cmd_pool) = single_time_cmd_buffer_start();
+        let (single_time_cmd_buffer, single_time_cmd_pool) = 
+            Renderer::single_time_cmd_buffer_start(&device, graphics_queue_family_idx);
         let vertices_copy_region = vk::BufferCopy {
             src_offset: 0,
             dst_offset: 0,
@@ -762,11 +391,8 @@ impl Renderer {
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 &graphics_queue_family_idx, &physical_device_memory_properties
             );
-        unsafe {
-        let data_ptr = device.map_memory(index_staging_buffer_device_memory, 0, index_buffer_size, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(model.vertex_indices.as_ptr(), data_ptr as *mut IndicesType, model.vertex_indices.len());
-        device.unmap_memory(index_staging_buffer_device_memory);
-        }
+        Renderer::copy_host_data_to_device_buffer(&device, index_staging_buffer_device_memory, index_buffer_size, 
+            model.vertex_indices.as_ptr(), model.vertex_indices.len());
         let (index_buffer, index_buffer_device_memory) = 
             Renderer::create_buffer(
                 &device, index_buffer_size,
@@ -782,14 +408,14 @@ impl Renderer {
         unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, index_staging_buffer, index_buffer, &[indices_copy_region])};
 
         // End command buffer and submit it for execution.
-        single_time_cmd_buffer_end(single_time_cmd_buffer, single_time_cmd_pool);
+        Renderer::single_time_cmd_buffer_end(&device, graphics_queue, single_time_cmd_buffer, single_time_cmd_pool);
         // ________________________________________________________________________________________________________________
         
         // CREATE UNIFORM BUFFERS: ________________________________________________________________________________________
         let uniform_buffer_size = std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize;
         let mut uniform_buffers: Vec<vk::Buffer>  = Vec::with_capacity(frames_in_flight_count as usize);
         let mut uniform_buffer_device_memories: Vec<vk::DeviceMemory>  = Vec::with_capacity(frames_in_flight_count as usize);
-        let mut uniform_buffer_mapped_memory_ptrs: Vec<*mut c_void> = Vec::with_capacity(frames_in_flight_count as usize);
+        let mut uniform_buffer_mapped_memory_ptrs: Vec<*mut UniformBufferObject> = Vec::with_capacity(frames_in_flight_count as usize);
         for _ in 0..frames_in_flight_count {
             let (uniform_buffer, uniform_buffer_device_memory) = 
                 Renderer::create_buffer(
@@ -803,14 +429,13 @@ impl Renderer {
             uniform_buffer_device_memories.push(uniform_buffer_device_memory);
             // Get persistent mapped memory pointers, since I am going to use it every frame:
             uniform_buffer_mapped_memory_ptrs.push(
-                unsafe{device.map_memory(uniform_buffer_device_memory, 0, uniform_buffer_size, vk::MemoryMapFlags::empty())}.unwrap()
+                unsafe{device.map_memory(uniform_buffer_device_memory, 0, uniform_buffer_size, vk::MemoryMapFlags::empty())}
+                    .unwrap() as *mut UniformBufferObject
             );
         }
         // ________________________________________________________________________________________________________________
 
-        // DEPTH IMAGES:___________________________________________________________________________________________________
-        let window_inner_size = window.inner_size();
-        
+        // DEPTH IMAGES:___________________________________________________________________________________________________        
         // Note: It is actually make more sense to create frame_in_flight_count amount of depth buffers, but for code simplicity,
         // I do create swapchain_image_count amount for now:
         let mut depth_images: Vec<vk::Image> = Vec::with_capacity(swapchain_image_count);
@@ -838,8 +463,8 @@ impl Renderer {
         }
         // ________________________________________________________________________________________________________________
 
-        // LOAD IMAGE______________________________________________________________________________________________________
-        let image_reader = image::io::Reader::open("./images/viking_room.png").unwrap();
+        // LOAD TEXTURE____________________________________________________________________________________________________
+        let image_reader = img::io::Reader::open("./images/viking_room.png").unwrap();
         let image_buffer = image_reader.decode().unwrap().into_rgba8();
         let image_bytes: Vec<u8> = image_buffer.bytes().map(|byte| {byte.unwrap()}).collect();
 
@@ -848,12 +473,8 @@ impl Renderer {
             Renderer::create_buffer(&device, texture_image_size as u64, vk::BufferUsageFlags::TRANSFER_SRC, 
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, 
             &graphics_queue_family_idx, &physical_device_memory_properties);
-
-        unsafe{
-        let data_ptr = device.map_memory(texture_image_staging_buffer_device_memory, 0, texture_image_size, vk::MemoryMapFlags::empty()).unwrap();
-            std::ptr::copy_nonoverlapping(image_bytes.as_ptr(), data_ptr as *mut u8, texture_image_size as usize);
-        device.unmap_memory(texture_image_staging_buffer_device_memory);
-        }
+        Renderer::copy_host_data_to_device_buffer(&device, texture_image_staging_buffer_device_memory, texture_image_size, 
+            image_bytes.as_ptr(), texture_image_size as usize);
 
         // Create Image:
         let (texture_image, texture_image_device_memory) = Renderer::create_image(
@@ -861,78 +482,30 @@ impl Renderer {
             vk::Format::R8G8B8A8_SRGB, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             vk::MemoryPropertyFlags::DEVICE_LOCAL);       
 
-        let transition_image_layout = |cmd_buffer: vk::CommandBuffer, transition_image: vk::Image, 
-            old_layout: vk::ImageLayout, new_layout: vk::ImageLayout,
-            src_access_mask: vk::AccessFlags, dst_access_mask: vk::AccessFlags,
-            src_stage_mask: vk::PipelineStageFlags, dst_stage_mask: vk::PipelineStageFlags| {
-            let image_subresource_range = vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            };
-            let image_memory_barrier = vk::ImageMemoryBarrier{
-                s_type: vk::StructureType::IMAGE_MEMORY_BARRIER,
-                p_next: ptr::null(),
-                src_access_mask: src_access_mask,
-                dst_access_mask: dst_access_mask,
-                old_layout: old_layout,
-                new_layout: new_layout,
-                src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-                image: transition_image,
-                subresource_range: image_subresource_range,
-            };
-            unsafe{device.cmd_pipeline_barrier(cmd_buffer,
-                src_stage_mask,
-                dst_stage_mask,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &[image_memory_barrier]
-            )};
-        };
-
-        let (single_time_cmd_buffer, single_time_cmd_pool) = single_time_cmd_buffer_start();
+        let (single_time_cmd_buffer, single_time_cmd_pool) = Renderer::single_time_cmd_buffer_start(&device, graphics_queue_family_idx);
         // Copying from a buffer to image requires to change IMAGELAYOUT. So, first I need to set the layout by using memory barriers:
-        transition_image_layout(single_time_cmd_buffer, texture_image, 
+        Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture_image, 
             vk::ImageLayout::UNDEFINED,          vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             vk::AccessFlags::NONE,               vk::AccessFlags::TRANSFER_WRITE,
             vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER);
-        {
-            // At that point, the image layout will be "TRANSFER_DST_OPTIMAL", so we can just do a copy operation:
-            let buffer_image_copy = vk::BufferImageCopy{
-                buffer_offset: 0,
-                buffer_row_length: 0,
-                buffer_image_height: 0,
-                image_subresource: vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                },
-                image_offset: vk::Offset3D {
-                    ..Default::default()
-                },
-                image_extent: vk::Extent3D {
-                    width: image_buffer.width(),
-                    height: image_buffer.height(),
-                    depth: 1
-                },
-            };
-            unsafe{device.cmd_copy_buffer_to_image(single_time_cmd_buffer, texture_image_staging_buffer, texture_image, 
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[buffer_image_copy])};
-        }
+        // At that point, the image layout will be "TRANSFER_DST_OPTIMAL", so we can just do a copy operation:
+        let extent = vk::Extent3D {
+            width: image_buffer.width(),
+            height: image_buffer.height(),
+            depth: 1
+        };
+        Renderer::copy_device_buffer_to_device_image(&device, single_time_cmd_buffer, &extent, texture_image_staging_buffer, texture_image);
         // After doing the copy, we need to prepare the image layout for shader reads by setting it to "IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL":
-        transition_image_layout(single_time_cmd_buffer, texture_image, 
+        Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture_image, 
             vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             vk::AccessFlags::TRANSFER_WRITE,       vk::AccessFlags::SHADER_READ,
             vk::PipelineStageFlags::TRANSFER,      vk::PipelineStageFlags::FRAGMENT_SHADER);
-        single_time_cmd_buffer_end(single_time_cmd_buffer, single_time_cmd_pool);
+        Renderer::single_time_cmd_buffer_end(&device, graphics_queue, single_time_cmd_buffer, single_time_cmd_pool);
 
-        unsafe{device.destroy_buffer(texture_image_staging_buffer, None)};
-        unsafe{device.free_memory(texture_image_staging_buffer_device_memory, None)};
+        unsafe {
+            device.destroy_buffer(texture_image_staging_buffer, None);
+            device.free_memory(texture_image_staging_buffer_device_memory, None)
+        };
 
         // Create texture image view:
         let texture_image_view = Renderer::create_image_view(&device, texture_image, vk::Format::R8G8B8A8_SRGB, vk::ImageAspectFlags::COLOR);
@@ -1162,6 +735,7 @@ impl Renderer {
             p_attachments: &color_blend_attachment_state,
             blend_constants: [0.0f32; 4] // is a pointer to an array of four values specifying the R, G, B, and A components of the blend constant color used in blending, depending on the blend factor. Blend constants are: vk::BlendFactor const values.
         };
+        // TODO: Can these things be done without dynamics? I heard it has performance impact.
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_state_ci = vk::PipelineDynamicStateCreateInfo {
             s_type: vk::StructureType::PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -1253,13 +827,6 @@ impl Renderer {
         };
         let command_buffers = unsafe{device.allocate_command_buffers(&command_buffer_alloc_info)}.unwrap();
         //_________________________________________________________________________________________________________________
-
-        let vk_index_type: vk::IndexType = vk::IndexType::UINT32;
-        { // A very ugly way of making sure that vk index type inside command buffers are correct.
-            let val1: IndicesType = 5;
-            let val2: u32 = 5;
-            debug_assert!(val1 == val2)
-        }
         Renderer {
             entry,
             instance,
@@ -1318,11 +885,9 @@ impl Renderer {
             depth_image_device_memories,
             depth_image_views,
 
-            start_time: std::time::Instant::now(),
-            vk_index_type
         }
     }
-    pub fn render_frame (&mut self, window_inner_size: winit::dpi::PhysicalSize<u32>, model_rotation: f32, model_scale: f32) {
+    pub fn render_frame (&mut self, window_inner_size: winit::dpi::PhysicalSize<u32>) {
         unsafe{self.device.wait_for_fences(&[self.queue_submit_finished_fences[self.current_frame_in_flight_idx]], true, u64::MAX)}.unwrap();
         unsafe{self.device.reset_fences(&[self.queue_submit_finished_fences[self.current_frame_in_flight_idx]])}.unwrap();
 
@@ -1391,18 +956,17 @@ impl Renderer {
         };
 
         // Update corresponding uniform buffer:
-        let time_since_start = std::time::Instant::now() - self.start_time;
         let ubo = UniformBufferObject {
-            model: glam::Mat4::from_rotation_z(model_rotation),//glam::Mat4::from_rotation_z(time_since_start.as_millis() as f32 / 1000.0f32),
-            view:  glam::Mat4::look_at_lh(glam::vec3(0.0, 1.25 * model_scale, 1.25 * model_scale), glam::vec3(0.0, 0.0, 0.0), glam::vec3(0.0, 0.0, -1.0)),     
+            model: glam::Mat4::from_rotation_z(self.model.rotation),//glam::Mat4::from_rotation_z(time_since_start.as_millis() as f32 / 1000.0f32),
+            view:  glam::Mat4::look_at_lh(glam::vec3(0.0, 1.25 * self.model.scale, 1.25 * self.model.scale), glam::vec3(0.0, 0.0, 0.0), glam::vec3(0.0, 0.0, -1.0)),     
             projection: glam::Mat4::perspective_lh(std::f32::consts::PI / 2.5f32, window_inner_size.width as f32 / window_inner_size.height as f32, 0.1, 100.0)
         };
-        unsafe{
+        unsafe {
         std::ptr::copy_nonoverlapping(
             &ubo, 
             (self.uniform_buffer_mapped_memory_ptrs[self.current_frame_in_flight_idx]) as *mut UniformBufferObject,
-            1
-        )};
+            1);
+        }
 
         
         // COMMAND BUFFER RECORDING:
@@ -1417,7 +981,7 @@ impl Renderer {
                     vk::PipelineBindPoint::GRAPHICS, self.graphics_pipelines[0]);
                 self.device.cmd_bind_vertex_buffers(self.cmd_buffers[self.current_frame_in_flight_idx], 0, &[self.vertex_buffer], &[0]);
                 
-                self.device.cmd_bind_index_buffer(self.cmd_buffers[self.current_frame_in_flight_idx], self.index_buffer, 0, self.vk_index_type);
+                self.device.cmd_bind_index_buffer(self.cmd_buffers[self.current_frame_in_flight_idx], self.index_buffer, 0, vk::IndexType::UINT32);
                 self.device.cmd_bind_descriptor_sets(self.cmd_buffers[self.current_frame_in_flight_idx], 
                     vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.descriptor_sets[self.current_frame_in_flight_idx]], &[]);
                 self.device.cmd_draw_indexed(self.cmd_buffers[self.current_frame_in_flight_idx], self.model.vertex_indices.len() as u32, 1, 0, 0, 0);
@@ -1435,6 +999,7 @@ impl Renderer {
             command_buffer_count: 1,
             p_command_buffers: &self.cmd_buffers[self.current_frame_in_flight_idx],
             signal_semaphore_count: 1,
+            // this signal semaphore will be signaled once all of the command buffers have completed execution:
             p_signal_semaphores: &self.render_finished_semaphores[self.current_frame_in_flight_idx],
         };
 
@@ -1463,132 +1028,6 @@ impl Renderer {
 
         self.current_frame_in_flight_idx = (self.current_frame_in_flight_idx + 1) % (self.frames_in_flight_count as usize);
     }
-    /// Logical device takes a DeviceQueueCreateInfo as a parameter. Therefore, Logical Device creates DeviceQueues.
-    fn create_device(instance : &ash::Instance, physical_device: vk::PhysicalDevice, 
-    graphics_queue_idx: u32) -> ash::Device {
-        let queue_priority = [1.0f32];
-        let queue_create_infos = vec![vk::DeviceQueueCreateInfo {
-            s_type: vk::StructureType::DEVICE_QUEUE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::DeviceQueueCreateFlags::empty(),
-            queue_family_index: graphics_queue_idx,
-            queue_count: 1,
-            p_queue_priorities: queue_priority.as_ptr(),    
-        }];
-
-        let device_ext_names = get_device_extension_names(instance, physical_device);
-        let device_create_info = ash::vk::DeviceCreateInfo {
-            s_type: vk::StructureType::DEVICE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::DeviceCreateFlags::empty(),
-            queue_create_info_count: queue_create_infos.len() as u32,
-            p_queue_create_infos: queue_create_infos.as_ptr(),
-            enabled_layer_count: 0,
-            pp_enabled_layer_names: ptr::null(), // Device-only layers are deprecated.
-            enabled_extension_count: device_ext_names.len() as u32,
-            pp_enabled_extension_names: device_ext_names.as_ptr(),
-            p_enabled_features: &vk::PhysicalDeviceFeatures::builder().sampler_anisotropy(true).build()
-        };
-    
-        unsafe{instance.create_device(physical_device, &device_create_info, None).unwrap()}
-    }
-
-    fn create_buffer (device: &ash::Device, size: u64, usage: vk::BufferUsageFlags, 
-    required_memory_flags: vk::MemoryPropertyFlags, p_queue_family_indices: *const u32,
-    physical_device_memory_properties: &vk::PhysicalDeviceMemoryProperties)
-    -> (vk::Buffer, vk::DeviceMemory) {
-        let buffer_ci = vk::BufferCreateInfo {
-            s_type: vk::StructureType::BUFFER_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::BufferCreateFlags::empty(),
-            size: size,
-            usage: usage,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            queue_family_index_count: 1,
-            p_queue_family_indices: p_queue_family_indices,
-        };
-
-        let buffer = unsafe{device.create_buffer(&buffer_ci, None)}.unwrap();
-
-        let mut memory_type_idx = 0;
-        let buffer_memory_requirements = unsafe{device.get_buffer_memory_requirements(buffer)};
-        println!("Buffer supported memory type bits: {:b}", buffer_memory_requirements.memory_type_bits);
-        
-        // Find required memory type in memory types AND this is suitable for the newly created buffer memory requirements:
-        // Info: Host coherent memory does not need flushing or invalidating.
-        for (idx, physical_device_memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
-            if physical_device_memory_type.property_flags.contains(required_memory_flags) &&
-            ((1 << idx) & buffer_memory_requirements.memory_type_bits) == (1 << idx) {
-                memory_type_idx = idx;
-                break;
-            }
-        }
-        println!("found memory_type_idx: {}", memory_type_idx);
-        
-        // Info: "Each resource may need more memory than the requested size of a resource. It's because drivers may need 
-        // some additional meta-data to manage given resource. That's why we need to call vkGet...MemoryRequirements() 
-        // functions and allocate enough memory.But when we want to modify contents of a buffer or image we need to think 
-        // only about its size (the size we requested during resource creation), not the data size returned by the mentioned 
-        // functions."
-        let buffer_mem_alloc_info = vk::MemoryAllocateInfo {
-            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            // Note: Actual VRAM size might be different from RAM memory, cuz of alignments(I guess).
-            allocation_size: buffer_memory_requirements.size,
-            memory_type_index: memory_type_idx as u32,
-        };
-        let buffer_device_memory = unsafe{device.allocate_memory(&buffer_mem_alloc_info, None)}.unwrap();
-        
-        // Need to bind them too! This way, you can have more than one buffers that can be bound to a single device memory via offsets.
-        unsafe{device.bind_buffer_memory(buffer, buffer_device_memory, 0)}.unwrap();
-
-        (buffer, buffer_device_memory) 
-    }
-
-    fn create_image_view(device: &ash::Device, image: vk::Image, surface_format: vk::Format, 
-    aspect_mask: vk::ImageAspectFlags) -> vk::ImageView {
-        let image_view_ci = vk::ImageViewCreateInfo {
-            s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::ImageViewCreateFlags::empty(),
-            image: image,
-            view_type: vk::ImageViewType::TYPE_2D,
-            format: surface_format,
-            components: vk::ComponentMapping {
-                r: vk::ComponentSwizzle::IDENTITY,
-                g: vk::ComponentSwizzle::IDENTITY,
-                b: vk::ComponentSwizzle::IDENTITY,
-                a: vk::ComponentSwizzle::IDENTITY
-            },
-            subresource_range: vk::ImageSubresourceRange{
-                aspect_mask: aspect_mask,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            }
-        };
-        
-        unsafe{device.create_image_view(&image_view_ci, None)}.unwrap()
-    }
-
-    fn create_framebuffer(device: &ash::Device, attachments: &[vk::ImageView], 
-    render_pass: vk::RenderPass, window_inner_size: dpi::PhysicalSize<u32>)
-    -> vk::Framebuffer {
-        let framebuffer_ci = vk::FramebufferCreateInfo {
-            s_type: vk::StructureType::FRAMEBUFFER_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::FramebufferCreateFlags::empty(),
-            render_pass: render_pass,
-            attachment_count: attachments.len() as u32,
-            p_attachments: attachments.as_ptr(),
-            width: window_inner_size.width,
-            height: window_inner_size.height,
-            layers: 1, // Width, height and layers define dimensions.
-        };
-
-        unsafe{device.create_framebuffer(&framebuffer_ci, None)}.unwrap()
-    }
 
     pub fn window_resized(&mut self, window_new_inner_size: winit::dpi::PhysicalSize<u32>) {
         unsafe{self.device.device_wait_idle()}.unwrap();
@@ -1597,32 +1036,6 @@ impl Renderer {
         self.recreate_framebuffers(window_new_inner_size);
 
         println!("Swapchain, depth images and framebuffers are recreated with window inner size: {:?}", window_new_inner_size);
-    }
-    fn recreate_swapchain(&mut self, window_new_inner_size: winit::dpi::PhysicalSize<u32>) {        
-        unsafe{self.swapchain_loader.destroy_swapchain(self.swapchain, None)};
-
-        let swapchain_needs = SwapchainCreationNeeds {
-            surface_format: self.surface_format,
-            surface_color_space: self.surface_color_space,
-            surface_pre_transform: self.surface_pre_transform,
-            surface_composite_alpha: self.surface_composite_alpha,
-            surface_present_mode: self.surface_present_mode,
-            swapchain_min_image_count: self.swapchain_min_image_count,
-            surface: self.surface,
-            window_inner_size: window_new_inner_size,
-            swapchain_loader: &self.swapchain_loader,
-        };
-        self.swapchain = Renderer::create_swapchain(&swapchain_needs);
-        
-        for image_view in &self.swapchain_image_views {
-            unsafe{self.device.destroy_image_view(*image_view, None)};
-        }
-        self.swapchain_image_views.clear();
-
-        self.swapchain_images = unsafe{self.swapchain_loader.get_swapchain_images(self.swapchain)}.unwrap();
-        for image in &self.swapchain_images {
-            self.swapchain_image_views.push(Renderer::create_image_view(&self.device, *image, self.surface_format, vk::ImageAspectFlags::COLOR));
-        }
     }
 
     fn recreate_depth_images(&mut self, window_new_inner_size: dpi::PhysicalSize<u32>) {
@@ -1649,107 +1062,6 @@ impl Renderer {
         }        
     }
 
-    fn recreate_framebuffers(&mut self, window_new_inner_size: dpi::PhysicalSize<u32>) {
-        for framebuffer in &self.framebuffers {
-            unsafe{self.device.destroy_framebuffer(*framebuffer, None)};
-        }
-        self.framebuffers.clear(); // Capacity of the Vec stays same after clearing.
-        for (idx, swapchain_image_view) in self.swapchain_image_views.iter().enumerate() {
-            self.framebuffers.push(Renderer::create_framebuffer(
-                &self.device, &[*swapchain_image_view, self.depth_image_views[idx]], self.render_pass, window_new_inner_size));
-        }
-    }
-    pub fn create_swapchain(needs: &SwapchainCreationNeeds) -> vk::SwapchainKHR {
-        let swapchain_ci = vk::SwapchainCreateInfoKHR {
-            s_type: vk::StructureType::SWAPCHAIN_CREATE_INFO_KHR,
-            p_next: ptr::null(),
-            flags: vk::SwapchainCreateFlagsKHR::empty(),
-            surface: needs.surface,
-            min_image_count: needs.swapchain_min_image_count, // Swapchain will create images with ATLEAST requested amount or more.
-            image_format: needs.surface_format,
-            image_color_space: needs.surface_color_space,
-            image_extent: vk::Extent2D{height: needs.window_inner_size.height, width: needs.window_inner_size.width},
-            image_array_layers: 1, // Determines the amount of layers each image consists of.This is always 1 unless you
-            // are developing a stereoscopic 3D application.
-            image_usage: vk::ImageUsageFlags::COLOR_ATTACHMENT, // specifies what kind of operations we'll use the images
-            // in the swap chain for.It is also possible that you'll render images to a separate image first to perform 
-            // operations like post-processing. In that case you may use a value like VK_IMAGE_USAGE_TRANSFER_DST_BIT 
-            // instead and use a memory operation to transfer the rendered image to a swap chain image.
-            image_sharing_mode: vk::SharingMode::EXCLUSIVE,
-            queue_family_index_count: 0, // This thing is set if vk::SharingMode::CONCURRENT. For example: If you have a
-            //  different GRAPHICS and PRESENT family queues, this should be "2" with
-            //  image_sharing_mode: vk::SharingMode::CONCURRENT
-            p_queue_family_indices: ptr::null(), // This thing is set if vk::SharingMode::CONCURRENT
-            pre_transform: needs.surface_pre_transform, // Describing the transform, relative to the presentation engine’s natural 
-            // orientation, applied to the image content prior to presentation. If it does not match the currentTransform
-            //  value returned by vkGetPhysicalDeviceSurfaceCapabilitiesKHR, the presentation engine will transform the 
-            // image content as part of the presentation operation.
-        composite_alpha: needs.surface_composite_alpha, // Indicating the alpha compositing mode to use when this surface is
-        // composited together with other surfaces on certain window systems.
-        present_mode: needs.surface_present_mode,
-        clipped: vk::TRUE, // specifies whether the Vulkan implementation is allowed to discard rendering operations 
-        // that affect regions of the surface that are not visible.
-        old_swapchain: vk::SwapchainKHR::null(),
-        };
-
-        unsafe {needs.swapchain_loader.create_swapchain(&swapchain_ci, None)}.unwrap()
-    }
-
-    fn create_image(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
-    width: u32, height: u32, format: vk::Format, tiling: 
-    vk::ImageTiling, usage: vk::ImageUsageFlags, mem_prop_flag: vk::MemoryPropertyFlags) -> (vk::Image, vk::DeviceMemory) {
-        let image_ci = vk::ImageCreateInfo {
-            s_type: vk::StructureType::IMAGE_CREATE_INFO,
-            p_next: ptr::null(),
-            flags: vk::ImageCreateFlags::empty(),
-            image_type: vk::ImageType::TYPE_2D,
-            format: format,
-            extent: vk::Extent3D{
-                width: width,
-                height: height,
-                depth: 1
-            },
-            mip_levels: 1,
-            array_layers: 1,
-            samples: vk::SampleCountFlags::TYPE_1,
-            tiling: tiling, 
-            usage: usage,
-            sharing_mode: vk::SharingMode::EXCLUSIVE,
-            queue_family_index_count: 0,
-            p_queue_family_indices: ptr::null(), // Ignored if image sharing is not CONCURRENT.
-            initial_layout: vk::ImageLayout::UNDEFINED,
-        };
-        let image = unsafe{device.create_image(&image_ci, None).unwrap()};
-        
-        let physical_device_memory_properties = 
-            unsafe{instance.get_physical_device_memory_properties(physical_device)};
-        let required_memory_flags = mem_prop_flag;
-        let mut memory_type_idx = 0;
-        let image_memory_requirements = unsafe{device.get_image_memory_requirements(image)};
-        // println!("Image supported memory type bits: {:b}", image_memory_requirements.memory_type_bits);
-        for (idx, physical_device_memory_type) in physical_device_memory_properties.memory_types.iter().enumerate() {
-            if physical_device_memory_type.property_flags.contains(required_memory_flags) &&
-            ((1 << idx) & image_memory_requirements.memory_type_bits) == (1 << idx) {
-                memory_type_idx = idx;
-                break;
-            }
-        }
-        // println!("Texture Image Allocation: found memory_type_idx: {}", memory_type_idx);
-        
-
-        let image_mem_alloc_info = vk::MemoryAllocateInfo {
-            s_type: vk::StructureType::MEMORY_ALLOCATE_INFO,
-            p_next: ptr::null(),
-            allocation_size: image_memory_requirements.size,
-            memory_type_index: memory_type_idx as u32,
-        };
-        let image_device_memory = unsafe{device.allocate_memory(&image_mem_alloc_info, None)}.unwrap();
-    
-        unsafe{device.bind_image_memory(image, image_device_memory, 0)}.unwrap();
-
-        (image, image_device_memory)
-    }
-
     fn create_depth_image_and_view (device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
     window_inner_size: dpi::PhysicalSize<u32>, depth_format: vk::Format) -> (vk::Image, vk::DeviceMemory, vk::ImageView) {
         let (depth_image, depth_image_device_memory) = Renderer::create_image(
@@ -1763,7 +1075,7 @@ impl Renderer {
 
 impl Drop for Renderer {
     fn drop(&mut self) {
-        unsafe{
+        unsafe {
         self.device.device_wait_idle().unwrap();
         // Command buffers are automatically freed when corresponding Command Pool is destroyed.
         self.device.destroy_command_pool(self.command_pool, None);

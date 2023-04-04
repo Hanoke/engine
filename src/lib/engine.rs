@@ -1,4 +1,5 @@
 mod renderer;
+mod model;
 
 use winit::event::ElementState;
 use winit::event_loop;
@@ -9,13 +10,14 @@ pub struct Engine {
     event_loop: event_loop::EventLoop<()>,
     window: window::Window,
     renderer: renderer::Renderer
+    // pub start_time: std::time::Instant,
 }
 
 impl Engine {
     pub fn new() -> Engine {
         let event_loop = winit::event_loop::EventLoop::new();
         let window = winit::window::WindowBuilder::new().with_title("Hanokei Engine").build(&event_loop).expect("Could not create a window.");
-        let renderer = renderer::Renderer::new(&window, 2);
+        let renderer = renderer::Renderer::new(&window, 3);
 
         Engine {
             event_loop,
@@ -28,11 +30,8 @@ impl Engine {
         // https://github.com/rust-windowing/winit/issues/2094
         let mut is_first_resized_event  = true;
 
-        let mut model_rotation: f32 = 1.2;
         let mut is_mouse_button_left_pressed = false;
-        let model_rotation_speed: f32 = 0.005;
-        
-        let mut model_scale : f32 = 1.0;
+        let model_rotation_delta_multiplier: f32 = 0.005;
         let model_scale_delta_multiplier: f32 = 0.2;
 
         self.event_loop.run(move |event, _, control_flow| {
@@ -44,7 +43,7 @@ impl Engine {
                     match event {
                         event::DeviceEvent::MouseMotion { delta } => {
                             if is_mouse_button_left_pressed {
-                                model_rotation += delta.0 as f32 * model_rotation_speed;
+                                self.renderer.model.rotation += delta.0 as f32 * self.renderer.model.rotation_speed;
                             }
                         },
                         _ => {}
@@ -79,7 +78,7 @@ impl Engine {
                     event::WindowEvent::MouseWheel { device_id, delta, phase, modifiers } => {
                         match delta {
                             event::MouseScrollDelta::LineDelta(x, y) => {
-                                model_scale -= y * model_scale_delta_multiplier;
+                                self.renderer.model.scale -= y * self.renderer.model.scale_speed;
                             },
                             _ => {}
                         }
@@ -99,7 +98,7 @@ impl Engine {
                 },
                 event::Event::RedrawRequested(_window_id) => {
                     // println!("Event::Requested");
-                    self.renderer.render_frame(self.window.inner_size(), model_rotation, model_scale);
+                    self.renderer.render_frame(self.window.inner_size());
                 },
                 _ => {
                     *control_flow = event_loop::ControlFlow::Poll;
