@@ -376,11 +376,7 @@ impl Renderer {
             dst_offset: 0,
             size: vertex_buffer_size,
         };
-        unsafe{
-            device.cmd_copy_buffer(single_time_cmd_buffer, vertex_staging_buffer, vertex_buffer, &[vertices_copy_region]);
-            device.destroy_buffer(vertex_staging_buffer, None);
-            device.free_memory(vertex_staging_buffer_device_memory, None);
-        }     
+        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, vertex_staging_buffer, vertex_buffer, &[vertices_copy_region]);}     
 
         // INDEX BUFFER:
         let index_buffer_size = model.get_index_buffer_size();
@@ -405,14 +401,17 @@ impl Renderer {
             dst_offset: 0,
             size: index_buffer_size,
         };
-        unsafe{
-            device.cmd_copy_buffer(single_time_cmd_buffer, index_staging_buffer, index_buffer, &[indices_copy_region]);
-            device.destroy_buffer(index_staging_buffer, None);
-            device.free_memory(index_staging_buffer_device_memory, None);
-        }
+        unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, index_staging_buffer, index_buffer, &[indices_copy_region]);}
 
         // End command buffer and submit it for execution.
         Renderer::single_time_cmd_buffer_end(&device, graphics_queue, single_time_cmd_buffer, single_time_cmd_pool);
+        // Free staging buffers and device memories.
+        unsafe {
+            device.destroy_buffer(vertex_staging_buffer, None);
+            device.free_memory(vertex_staging_buffer_device_memory, None);
+            device.destroy_buffer(index_staging_buffer, None);
+            device.free_memory(index_staging_buffer_device_memory, None);
+        }
         // ________________________________________________________________________________________________________________
         
         // CREATE UNIFORM BUFFERS: ________________________________________________________________________________________
@@ -505,7 +504,7 @@ impl Renderer {
             vk::AccessFlags::TRANSFER_WRITE,       vk::AccessFlags::SHADER_READ,
             vk::PipelineStageFlags::TRANSFER,      vk::PipelineStageFlags::FRAGMENT_SHADER);
         Renderer::single_time_cmd_buffer_end(&device, graphics_queue, single_time_cmd_buffer, single_time_cmd_pool);
-
+        // Free staging buffer and device memory.
         unsafe {
             device.destroy_buffer(texture_image_staging_buffer, None);
             device.free_memory(texture_image_staging_buffer_device_memory, None)
