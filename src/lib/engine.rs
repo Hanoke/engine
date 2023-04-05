@@ -17,7 +17,7 @@ impl Engine {
     pub fn new() -> Engine {
         let event_loop = winit::event_loop::EventLoop::new();
         let window = winit::window::WindowBuilder::new().with_title("Hanokei Engine").build(&event_loop).expect("Could not create a window.");
-        let renderer = renderer::Renderer::new(&window, 3);
+        let renderer = renderer::Renderer::new(&window, 8);
 
         Engine {
             event_loop,

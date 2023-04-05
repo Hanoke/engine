@@ -31,6 +31,7 @@ pub struct Renderer {
     pub physical_device: vk::PhysicalDevice,
     pub graphics_queue: vk::Queue,
     pub device: ash::Device,
+
     pub surface_loader: extensions::khr::Surface,
     pub surface_format: vk::Format,
     pub surface_color_space: vk::ColorSpaceKHR,
@@ -38,22 +39,28 @@ pub struct Renderer {
     pub surface_composite_alpha: vk::CompositeAlphaFlagsKHR,
     pub surface_present_mode: vk::PresentModeKHR,
     pub surface: vk::SurfaceKHR,
+
     pub swapchain_loader: extensions::khr::Swapchain,
     pub swapchain: vk::SwapchainKHR,
     pub swapchain_images: Vec<vk::Image>,
     pub swapchain_image_views: Vec<vk::ImageView>,
     pub swapchain_min_image_count: u32,
+
     pub vertex_shader_module: vk::ShaderModule,
     pub fragment_shader_module: vk::ShaderModule,
+    
     pub render_pass: vk::RenderPass,
     pub framebuffers: Vec<vk::Framebuffer>,
     pub pipeline_layout: vk::PipelineLayout,
     pub graphics_pipelines: Vec<vk::Pipeline>,
+
     pub command_pool: vk::CommandPool,
     pub cmd_buffers: Vec<vk::CommandBuffer>,
+
     pub image_available_semaphores: Vec<vk::Semaphore>,
     pub render_finished_semaphores: Vec<vk::Semaphore>,
     pub queue_submit_finished_fences: Vec<vk::Fence>,
+
     pub frames_in_flight_count: u32,
     pub current_frame_in_flight_idx: usize,
 
@@ -276,7 +283,7 @@ impl Renderer {
         // A guy from: "https://www.reddit.com/r/vulkan/comments/s80reu/subpass_dependencies_what_are_those_and_why_do_i/" says: 
         // "Keep a single subpass in each renderpass, use external dependencies only and optimize later when you're ready to measure the
         //  performance impact." Because when learning VK, adding multiple subpasses might increase complexity and they say desktop
-        // is not actually benefit much from it like mobiles do. TODO: Research this when you understand Vk better.
+        // is not actually benefit much from it like mobiles do. TODO: Benchmark when appropriate.
         let subpass_desc = vk::SubpassDescription {
             flags: vk::SubpassDescriptionFlags::empty(),
             pipeline_bind_point: vk::PipelineBindPoint::GRAPHICS,
@@ -289,8 +296,25 @@ impl Renderer {
             preserve_attachment_count: 0,
             p_preserve_attachments: ptr::null(),
         };
-        // Info: Subpasses are group of rendering command buffers.
-        // Info about subpasses: https://www.reddit.com/r/vulkan/comments/s80reu/subpass_dependencies_what_are_those_and_why_do_i/
+        // --VULKAN SYNCHRONIZATION INFOS--
+        // *Info*: Subpasses are group of rendering command buffers.
+        // *Info about subpasses*: https://www.reddit.com/r/vulkan/comments/s80reu/subpass_dependencies_what_are_those_and_why_do_i/
+        // *Info about pipeline barriers*: Pipeline Barriers creates execution dependency with first sync scope and secondary sync  scope 
+        // in the pipeline. First sync stage must be executed first before the second sync stage.
+        // *Info about memory barriers*: But only using pipeline barriers is not enough. The caches must be flushed or **visible** to
+        // other L1 caches. When a memory is sent to L2 cache, it becomes **available** but not **visible**. In order to make it
+        // **visible** it need to sent to corresponding L1 cache. Likewise if a core wrote to its own L1 cache the data is **visible**,
+        // but not **available** because L2 is different from the newly written L1. In order to make the data **visible** it has to be 
+        // written to L2. Afterwards, it is going to be written to VRAM.
+        // For example: if you set a memory barrier with src_access= COLOR_WRITE and dst_access= SHADER_READ, the command that will
+        // write to COLOR must make the memory **available** first in corresponding L2 and then the command that will do SHADER_READ
+        // access must have the memory **visible** in its L1.
+        // While first sync stage indicates all of the stages before it as a dependency and second sync stage indicates all the stages
+        // after it, memory barriers does not have this kind of inclusiveness; You have to include all the memory access dependencies
+        // exclusively one by one. 
+        // *Info*: There is also other sync object: "Event". An event is set by some stage and all of previous commands that is affected
+        // by the event stage must be happened before other commands that wait for a specific event stage(it can be a different stage
+        // from set stage). But all of the other commands between setevent and waitevent can be happened without any dependancy.
         let subpass_dependency = vk::SubpassDependency{
             src_subpass: vk::SUBPASS_EXTERNAL, // VK_SUBPASS_EXTERNAL refers to all subpasses in all render passes before (if used in srcSubpass) or after (if used in dstSubpass) this render pass. Without it you would only be able to synchronize subpasses within the current render pass. You wouldn't be able to, for example, wait for a previous render pass to complete before executing this subpass.
             dst_subpass: 0, // If we want to depend on a subpass that's part of a after render pass, we can just pass in VK_SUBPASS_EXTERNAL here. 
@@ -402,16 +426,6 @@ impl Renderer {
             size: index_buffer_size,
         };
         unsafe{device.cmd_copy_buffer(single_time_cmd_buffer, index_staging_buffer, index_buffer, &[indices_copy_region]);}
-
-        // End command buffer and submit it for execution.
-        Renderer::single_time_cmd_buffer_end(&device, graphics_queue, single_time_cmd_buffer, single_time_cmd_pool);
-        // Free staging buffers and device memories.
-        unsafe {
-            device.destroy_buffer(vertex_staging_buffer, None);
-            device.free_memory(vertex_staging_buffer_device_memory, None);
-            device.destroy_buffer(index_staging_buffer, None);
-            device.free_memory(index_staging_buffer_device_memory, None);
-        }
         // ________________________________________________________________________________________________________________
         
         // CREATE UNIFORM BUFFERS: ________________________________________________________________________________________
@@ -485,7 +499,6 @@ impl Renderer {
             vk::Format::R8G8B8A8_SRGB, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             vk::MemoryPropertyFlags::DEVICE_LOCAL);       
 
-        let (single_time_cmd_buffer, single_time_cmd_pool) = Renderer::single_time_cmd_buffer_start(&device, graphics_queue_family_idx);
         // Copying from a buffer to image requires to change IMAGELAYOUT. So, first I need to set the layout by using memory barriers:
         Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture_image, 
             vk::ImageLayout::UNDEFINED,          vk::ImageLayout::TRANSFER_DST_OPTIMAL,
@@ -504,11 +517,15 @@ impl Renderer {
             vk::AccessFlags::TRANSFER_WRITE,       vk::AccessFlags::SHADER_READ,
             vk::PipelineStageFlags::TRANSFER,      vk::PipelineStageFlags::FRAGMENT_SHADER);
         Renderer::single_time_cmd_buffer_end(&device, graphics_queue, single_time_cmd_buffer, single_time_cmd_pool);
-        // Free staging buffer and device memory.
+        // Free staging buffers and device memories.
         unsafe {
             device.destroy_buffer(texture_image_staging_buffer, None);
-            device.free_memory(texture_image_staging_buffer_device_memory, None)
-        };
+            device.destroy_buffer(vertex_staging_buffer, None);
+            device.destroy_buffer(index_staging_buffer, None);
+            device.free_memory(texture_image_staging_buffer_device_memory, None);
+            device.free_memory(vertex_staging_buffer_device_memory, None);
+            device.free_memory(index_staging_buffer_device_memory, None);
+        }
 
         // Create texture image view:
         let texture_image_view = Renderer::create_image_view(&device, texture_image, vk::Format::R8G8B8A8_SRGB, vk::ImageAspectFlags::COLOR);
@@ -998,14 +1015,31 @@ impl Renderer {
             command_buffer_count: 1,
             p_command_buffers: &self.cmd_buffers[self.current_frame_in_flight_idx],
             signal_semaphore_count: 1,
-            // this signal semaphore will be signaled once all of the command buffers have completed execution:
+            // Info: binary semaphore signal and wait must be 1:1 pair because waiting on a semaphore also unsignals it.
+            // Also binary semaphores does only device-device synchronization.
+            // If you need more complex semaphore where you need to wait for a semaphore from 2 batches of commands let say,
+            // you can use timeline semaphores. Timeline semaphores have an internal u64 that can be incremented either by 
+            // host or device. It can be read from host. It can be waited from either host or device.
+            // this signal semaphore will be signaled once all of the p_command_buffers have completed execution:
             p_signal_semaphores: &self.render_finished_semaphores[self.current_frame_in_flight_idx],
         };
-
+        // TODO: check all of the fence and semaphore logic in render_frame and see if it is correct.
         unsafe{self.device.queue_submit(
             self.graphics_queue, 
             &[submit_info], 
-            // This fence will be signaled once all of the command buffers inside queue have completed execution:
+            // Info: This fence will be signaled once whole BATCH(group of command buffers that have been sent) is completed in queue.
+            // In this case the batch has only 1 command buffer, if there are other commands/commandbuffers/batches that has
+            // no relationship with the submitinfo we sent, they can be continued after the fence is signaled.
+            // If there is cmdA, batch1[cmd1, cmd2, cmd3], cmdB in a queue and if batch1 has to signal a fence in the end,
+            // cmdA and batch1 must be completed in any other in order to signal the fence. Because this fence mechanism puts 
+            // "syncronization scopes". Syncronization scopes has first scope and second scope.
+            // Syncronization scopes creates "execution dependency" that dictates for two sets of operations, first set must happen
+            // before the second set.
+            // In the example: cmdA, batch1[cmd1, cmd2, cmd3](signal fence here), cmdB
+            // then, this fence adds a first synchronization scope that encapsulates cmdA and batch1. Second syncronization scope
+            // normally would be the signalling fence op and the ops after the fence signalling, but queue_submit command puts only
+            // the fence signalling op as second syncronization scope. After fence signalling, it has no execution dependencies for 
+            // subsequent ops. 
             self.queue_submit_finished_fences[self.current_frame_in_flight_idx] 
         )}.unwrap();
     
