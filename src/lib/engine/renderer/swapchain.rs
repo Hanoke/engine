@@ -74,7 +74,8 @@ impl super::Renderer {
 
         self.swapchain_images = unsafe{self.swapchain_loader.get_swapchain_images(self.swapchain)}.unwrap();
         for image in &self.swapchain_images {
-            self.swapchain_image_views.push(super::Renderer::create_image_view(&self.device, *image, self.surface_format, vk::ImageAspectFlags::COLOR));
+            self.swapchain_image_views.push(super::Renderer::create_image_view(&self.device, *image, self.surface_format, 
+                1, vk::ImageAspectFlags::COLOR));
         }
     }
 }

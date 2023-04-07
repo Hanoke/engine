@@ -42,8 +42,8 @@ impl super::Renderer {
             device.unmap_memory(dst_device_memory);
         }    
     }
-    pub fn copy_device_buffer_to_device_image(device: &ash::Device, cmd_buffer: vk::CommandBuffer, extent: &vk::Extent3D, 
-    src_buffer: vk::Buffer, dst_image: vk::Image) {
+    pub fn copy_device_buffer_to_device_image(device: &ash::Device, cmd_buffer: vk::CommandBuffer, src_buffer: vk::Buffer, 
+    dst_image: vk::Image, extent: &vk::Extent3D) {
         let buffer_image_copy = vk::BufferImageCopy{
             buffer_offset: 0,
             buffer_row_length: 0,

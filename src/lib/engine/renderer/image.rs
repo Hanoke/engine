@@ -3,24 +3,24 @@ use std::ptr;
 
 impl super::Renderer {
     pub fn create_image(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
-    width: u32, height: u32, format: vk::Format, tiling: 
+    width: u32, height: u32, mip_levels: u32, format: vk::Format, tiling: 
     vk::ImageTiling, usage: vk::ImageUsageFlags, mem_prop_flag: vk::MemoryPropertyFlags) -> (vk::Image, vk::DeviceMemory) {
         let image_ci = vk::ImageCreateInfo {
             s_type: vk::StructureType::IMAGE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::ImageCreateFlags::empty(),
             image_type: vk::ImageType::TYPE_2D,
-            format: format,
+            format,
             extent: vk::Extent3D{
                 width: width,
                 height: height,
                 depth: 1
             },
-            mip_levels: 1,
+            mip_levels,
             array_layers: 1,
             samples: vk::SampleCountFlags::TYPE_1,
-            tiling: tiling, 
-            usage: usage,
+            tiling, 
+            usage,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
             queue_family_index_count: 0,
             p_queue_family_indices: ptr::null(), // Ignored if image sharing is not CONCURRENT.
@@ -57,13 +57,13 @@ impl super::Renderer {
         (image, image_device_memory)
     }
 
-    pub fn create_image_view(device: &ash::Device, image: vk::Image, surface_format: vk::Format, 
+    pub fn create_image_view(device: &ash::Device, image: vk::Image, surface_format: vk::Format, mip_levels: u32,
     aspect_mask: vk::ImageAspectFlags) -> vk::ImageView {
         let image_view_ci = vk::ImageViewCreateInfo {
             s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::ImageViewCreateFlags::empty(),
-            image: image,
+            image,
             view_type: vk::ImageViewType::TYPE_2D,
             format: surface_format,
             components: vk::ComponentMapping {
@@ -73,9 +73,9 @@ impl super::Renderer {
                 a: vk::ComponentSwizzle::IDENTITY
             },
             subresource_range: vk::ImageSubresourceRange{
-                aspect_mask: aspect_mask,
+                aspect_mask,
                 base_mip_level: 0,
-                level_count: 1,
+                level_count: mip_levels,
                 base_array_layer: 0,
                 layer_count: 1,
             }
@@ -84,23 +84,17 @@ impl super::Renderer {
         unsafe{device.create_image_view(&image_view_ci, None)}.unwrap()
     }
 
-    pub fn transition_image_layout (device: &ash::Device, cmd_buffer: vk::CommandBuffer, transition_image: vk::Image, old_layout: vk::ImageLayout, 
-    new_layout: vk::ImageLayout, src_access_mask: vk::AccessFlags, dst_access_mask: vk::AccessFlags, 
-    src_stage_mask: vk::PipelineStageFlags, dst_stage_mask: vk::PipelineStageFlags) {
-        let image_subresource_range = vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::COLOR,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        };
+    pub fn transition_image_layout (device: &ash::Device, cmd_buffer: vk::CommandBuffer, transition_image: vk::Image,
+    image_subresource_range: vk::ImageSubresourceRange, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout,
+    src_access_mask: vk::AccessFlags, dst_access_mask: vk::AccessFlags, src_stage_mask: vk::PipelineStageFlags,
+    dst_stage_mask: vk::PipelineStageFlags) {
         let image_memory_barrier = vk::ImageMemoryBarrier{
             s_type: vk::StructureType::IMAGE_MEMORY_BARRIER,
             p_next: ptr::null(),
-            src_access_mask: src_access_mask,
-            dst_access_mask: dst_access_mask,
-            old_layout: old_layout,
-            new_layout: new_layout,
+            src_access_mask,
+            dst_access_mask,
+            old_layout,
+            new_layout,
             src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
             dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
             image: transition_image,

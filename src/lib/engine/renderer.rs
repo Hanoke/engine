@@ -77,10 +77,10 @@ pub struct Renderer {
     pub descriptor_pool: vk::DescriptorPool,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
 
-    texture_image: vk::Image,
-    texture_image_device_memory: vk::DeviceMemory,
-    texture_image_view: vk::ImageView,
-    texture_image_sampler: vk::Sampler,
+    texture: vk::Image,
+    texture_device_memory: vk::DeviceMemory,
+    texture_view: vk::ImageView,
+    texture_sampler: vk::Sampler,
 
     depth_images: Vec<vk::Image>,
     depth_image_device_memories: Vec<vk::DeviceMemory>,
@@ -183,7 +183,7 @@ impl Renderer {
         let swapchain_image_count = swapchain_images.len();
         let mut swapchain_image_views = Vec::<vk::ImageView>::with_capacity(swapchain_images.len());
         for image in &swapchain_images {
-            swapchain_image_views.push(Renderer::create_image_view(&device, *image, surface_format, vk::ImageAspectFlags::COLOR));
+            swapchain_image_views.push(Renderer::create_image_view(&device, *image, surface_format, 1, vk::ImageAspectFlags::COLOR));
         }
         // ________________________________________________________________________________________________________________
 
@@ -485,22 +485,33 @@ impl Renderer {
         let image_buffer = image_reader.decode().unwrap().into_rgba8();
         let image_bytes: Vec<u8> = image_buffer.bytes().map(|byte| {byte.unwrap()}).collect();
 
-        let texture_image_size = image_bytes.len() as vk::DeviceSize;
-        let (texture_image_staging_buffer, texture_image_staging_buffer_device_memory) =
-            Renderer::create_buffer(&device, texture_image_size as u64, vk::BufferUsageFlags::TRANSFER_SRC, 
+        
+        let texture_size = image_bytes.len() as vk::DeviceSize;
+        let (texture_staging_buffer, texture_staging_buffer_device_memory) = Renderer::create_buffer(
+            &device, texture_size as u64, vk::BufferUsageFlags::TRANSFER_SRC, 
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, 
             &graphics_queue_family_idx, &physical_device_memory_properties);
-        Renderer::copy_host_data_to_device_buffer(&device, texture_image_staging_buffer_device_memory, texture_image_size, 
-            image_bytes.as_ptr(), texture_image_size as usize);
-
+        Renderer::copy_host_data_to_device_buffer(&device, texture_staging_buffer_device_memory, texture_size, 
+            image_bytes.as_ptr(), texture_size as usize);
+                
         // Create Image:
-        let (texture_image, texture_image_device_memory) = Renderer::create_image(
-            &device, &instance, physical_device, image_buffer.width(), image_buffer.height(), 
-            vk::Format::R8G8B8A8_SRGB, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL);       
+        // TODO: Should mip_levels be the max(width,height) or min(width, height)? How can you divide 64 for 7 times if other
+        // axis is 128?
+        let texture_mipmap_levels = ((u32::max(image_buffer.width(), image_buffer.height()) as f32).log2().floor() + 1.0) as u32;
+        let (texture, texture_device_memory) = Renderer::create_image(
+            &device, &instance, physical_device, image_buffer.width(), image_buffer.height(), texture_mipmap_levels,
+            vk::Format::R8G8B8A8_SRGB, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST |
+            vk::ImageUsageFlags::SAMPLED, vk::MemoryPropertyFlags::DEVICE_LOCAL);       
 
         // Copying from a buffer to image requires to change IMAGELAYOUT. So, first I need to set the layout by using memory barriers:
-        Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture_image, 
+        let image_subresource_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture, image_subresource_range, 
             vk::ImageLayout::UNDEFINED,          vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             vk::AccessFlags::NONE,               vk::AccessFlags::TRANSFER_WRITE,
             vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER);
@@ -510,25 +521,99 @@ impl Renderer {
             height: image_buffer.height(),
             depth: 1
         };
-        Renderer::copy_device_buffer_to_device_image(&device, single_time_cmd_buffer, &extent, texture_image_staging_buffer, texture_image);
-        // After doing the copy, we need to prepare the image layout for shader reads by setting it to "IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL":
-        Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture_image, 
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::AccessFlags::TRANSFER_WRITE,       vk::AccessFlags::SHADER_READ,
-            vk::PipelineStageFlags::TRANSFER,      vk::PipelineStageFlags::FRAGMENT_SHADER);
+        
+        Renderer::copy_device_buffer_to_device_image(&device, single_time_cmd_buffer, texture_staging_buffer, texture, &extent);
+        // After doing the copy, we need to prepare the first mipmap level(0) as a read source for blit:
+        Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture, image_subresource_range, 
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            vk::AccessFlags::TRANSFER_WRITE,       vk::AccessFlags::TRANSFER_READ,
+            vk::PipelineStageFlags::TRANSFER,      vk::PipelineStageFlags::TRANSFER);
+
         Renderer::single_time_cmd_buffer_end(&device, graphics_queue, single_time_cmd_buffer, single_time_cmd_pool);
         // Free staging buffers and device memories.
+        // TODO: This is very bizarre at first look, somehow fix this kind of many command executions inside a single command buffer. maybe just create another single command buffer for each logical operation in its own space.
         unsafe {
-            device.destroy_buffer(texture_image_staging_buffer, None);
+            device.destroy_buffer(texture_staging_buffer, None);
             device.destroy_buffer(vertex_staging_buffer, None);
             device.destroy_buffer(index_staging_buffer, None);
-            device.free_memory(texture_image_staging_buffer_device_memory, None);
+            device.free_memory(texture_staging_buffer_device_memory, None);
             device.free_memory(vertex_staging_buffer_device_memory, None);
             device.free_memory(index_staging_buffer_device_memory, None);
         }
 
+        // Generate texture mipmaps:
+        let (single_time_cmd_buffer, single_time_cmd_pool) = Renderer::single_time_cmd_buffer_start(&device,
+             graphics_queue_family_idx);
+        // mipmap_level 0 is reserved for the original size image.
+        for mipmap_level in 1..texture_mipmap_levels {
+            let image_width = image_buffer.width();
+            let image_height = image_buffer.height();
+            let image_blit = vk::ImageBlit {
+                src_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: mipmap_level - 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                src_offsets: [
+                    vk::Offset3D {x: 0, y: 0, z: 0}, 
+                    vk::Offset3D {
+                        x: (image_width >> (mipmap_level - 1)) as i32,
+                        y: (image_height >> (mipmap_level - 1)) as i32,
+                        z: 1
+                    }],
+                dst_subresource: vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: mipmap_level,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                dst_offsets: [
+                    vk::Offset3D {x: 0, y: 0, z: 0}, 
+                    vk::Offset3D {
+                        x: (image_width >> mipmap_level) as i32,
+                        y: (image_height >> mipmap_level) as i32,
+                        z: 1
+                    }],
+            };
+            // This mipmap level will have undefined layout and no access flag prior so make it ready for dst write
+            let image_subresource_range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: mipmap_level,   // Starting from this mipmap_level...
+                level_count: 1, // ... just get this many level into the image view.
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture, image_subresource_range, 
+                vk::ImageLayout::UNDEFINED,         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::AccessFlags::empty(),           vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags::TRANSFER,   vk::PipelineStageFlags::TRANSFER);
+            // TODO: Need to check physicaldeviceformatproperties for linear filtering support.
+            unsafe{device.cmd_blit_image(single_time_cmd_buffer, texture, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, texture,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[image_blit], vk::Filter::LINEAR)};
+            // The newly blitted mipmap level becomes the src read for the next loop:
+            Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture, image_subresource_range, 
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::AccessFlags::TRANSFER_WRITE,       vk::AccessFlags::TRANSFER_READ,
+                vk::PipelineStageFlags::TRANSFER,      vk::PipelineStageFlags::TRANSFER);
+        }
+        // Make all mipmap levels ready to be read from fragment shader:
+        let image_subresource_range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: texture_mipmap_levels,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        Renderer::transition_image_layout(&device, single_time_cmd_buffer, texture, image_subresource_range, 
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,  vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::AccessFlags::TRANSFER_READ,         vk::AccessFlags::SHADER_READ,
+            vk::PipelineStageFlags::TRANSFER,       vk::PipelineStageFlags::FRAGMENT_SHADER);
+        Renderer::single_time_cmd_buffer_end(&device, graphics_queue, single_time_cmd_buffer, single_time_cmd_pool);
+
         // Create texture image view:
-        let texture_image_view = Renderer::create_image_view(&device, texture_image, vk::Format::R8G8B8A8_SRGB, vk::ImageAspectFlags::COLOR);
+        let texture_view = Renderer::create_image_view(&device, texture, vk::Format::R8G8B8A8_SRGB,
+            texture_mipmap_levels, vk::ImageAspectFlags::COLOR);
 
         // Create Texture Sampler:
         let physical_device_properties = unsafe{instance.get_physical_device_properties(physical_device)};
@@ -548,11 +633,11 @@ impl Renderer {
             compare_enable: vk::FALSE,
             compare_op: vk::CompareOp::ALWAYS,
             min_lod: 0.0f32,
-            max_lod: 0.0f32,
+            max_lod: texture_mipmap_levels as f32,
             border_color: vk::BorderColor::INT_OPAQUE_BLACK,
             unnormalized_coordinates: vk::FALSE,
         };
-        let texture_image_sampler = unsafe{device.create_sampler(&texture_sampler_ci, None)}.unwrap();
+        let texture_sampler = unsafe{device.create_sampler(&texture_sampler_ci, None)}.unwrap();
         //_________________________________________________________________________________________________________________
 
         // CREATE DESCRIPTOR LAYOUT:_______________________________________________________________________________________
@@ -628,8 +713,8 @@ impl Renderer {
                     range: std::mem::size_of::<UniformBufferObject>() as vk::DeviceSize
             };
             let descriptor_image_info = vk::DescriptorImageInfo {
-                    sampler: texture_image_sampler,
-                    image_view: texture_image_view,
+                    sampler: texture_sampler,
+                    image_view: texture_view,
                     image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             };
 
@@ -892,10 +977,10 @@ impl Renderer {
             descriptor_pool,
             descriptor_sets,
             
-            texture_image,
-            texture_image_device_memory,
-            texture_image_view,
-            texture_image_sampler,
+            texture,
+            texture_device_memory,
+            texture_view,
+            texture_sampler,
 
             depth_images,
             depth_image_device_memories,
@@ -1098,9 +1183,9 @@ impl Renderer {
     fn create_depth_image_and_view (device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
     window_inner_size: dpi::PhysicalSize<u32>, depth_format: vk::Format) -> (vk::Image, vk::DeviceMemory, vk::ImageView) {
         let (depth_image, depth_image_device_memory) = Renderer::create_image(
-            &device, &instance, physical_device, window_inner_size.width, window_inner_size.height, 
+            &device, &instance, physical_device, window_inner_size.width, window_inner_size.height, 1,
             depth_format, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL);
-        let depth_image_view = Renderer::create_image_view(&device, depth_image, depth_format, vk::ImageAspectFlags::DEPTH);
+        let depth_image_view = Renderer::create_image_view(&device, depth_image, depth_format, 1, vk::ImageAspectFlags::DEPTH);
 
         (depth_image, depth_image_device_memory, depth_image_view)
     }
@@ -1133,13 +1218,13 @@ impl Drop for Renderer {
         for buffer in &self.uniform_buffers {
             self.device.destroy_buffer(*buffer, None);
         }
-        self.device.destroy_image(self.texture_image, None);
+        self.device.destroy_image(self.texture, None);
         for depth_image in &self.depth_images {
             self.device.destroy_image(*depth_image, None);
         }
         self.device.free_memory(self.vertex_buffer_device_memory, None);
         self.device.free_memory(self.index_buffer_device_memory, None);
-        self.device.free_memory(self.texture_image_device_memory, None);
+        self.device.free_memory(self.texture_device_memory, None);
         for depth_image_device_memory in &self.depth_image_device_memories {
             self.device.free_memory(*depth_image_device_memory, None);
         }
@@ -1155,8 +1240,8 @@ impl Drop for Renderer {
         for image_view in &self.swapchain_image_views {
             self.device.destroy_image_view(*image_view, None);
         }
-        self.device.destroy_sampler(self.texture_image_sampler, None);
-        self.device.destroy_image_view(self.texture_image_view, None);
+        self.device.destroy_sampler(self.texture_sampler, None);
+        self.device.destroy_image_view(self.texture_view, None);
         for depth_image_view in &self.depth_image_views {
             self.device.destroy_image_view(*depth_image_view, None);
         }
