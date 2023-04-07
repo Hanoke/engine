@@ -64,15 +64,15 @@ impl Model {
             scale_speed: 0.2
         }
     }
-    #[inline]
+    #[inline(always)]
     pub fn get_vertex_input_binding_stride () -> u32 {
         std::mem::size_of::<renderer::Vertex>() as u32
     }
-    #[inline]
+    #[inline(always)]
     pub fn get_vertex_buffer_size(&self) -> vk::DeviceSize {
         (self.vertices.len() * Model::get_vertex_input_binding_stride() as usize) as u64
     }
-    #[inline]
+    #[inline(always)]
     pub fn get_index_buffer_size (&self) -> vk::DeviceSize {
         (self.vertex_indices.len() * std::mem::size_of::<u32>()) as u64
     }

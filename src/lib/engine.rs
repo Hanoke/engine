@@ -17,7 +17,7 @@ impl Engine {
     pub fn new() -> Engine {
         let event_loop = winit::event_loop::EventLoop::new();
         let window = winit::window::WindowBuilder::new().with_title("Hanokei Engine").build(&event_loop).expect("Could not create a window.");
-        let renderer = renderer::Renderer::new(&window, 8);
+        let renderer = renderer::Renderer::new(&window, 3);
 
         Engine {
             event_loop,
@@ -31,8 +31,6 @@ impl Engine {
         let mut is_first_resized_event  = true;
 
         let mut is_mouse_button_left_pressed = false;
-        let model_rotation_delta_multiplier: f32 = 0.005;
-        let model_scale_delta_multiplier: f32 = 0.2;
 
         self.event_loop.run(move |event, _, control_flow| {
             // Need to check this because when window is minimized,  WindowEvent::Resized is fired with (height: 0, width: 0).
