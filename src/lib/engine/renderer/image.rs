@@ -2,8 +2,9 @@ use ash::{self, vk};
 use std::ptr;
 
 impl super::Renderer {
+    /// Also binds image to device memory.
     pub fn create_image(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
-    width: u32, height: u32, mip_levels: u32, format: vk::Format, tiling: 
+    width: u32, height: u32, mip_levels: u32, samples: vk::SampleCountFlags, format: vk::Format, tiling: 
     vk::ImageTiling, usage: vk::ImageUsageFlags, mem_prop_flag: vk::MemoryPropertyFlags) -> (vk::Image, vk::DeviceMemory) {
         let image_ci = vk::ImageCreateInfo {
             s_type: vk::StructureType::IMAGE_CREATE_INFO,
@@ -18,7 +19,7 @@ impl super::Renderer {
             },
             mip_levels,
             array_layers: 1,
-            samples: vk::SampleCountFlags::TYPE_1,
+            samples,
             tiling, 
             usage,
             sharing_mode: vk::SharingMode::EXCLUSIVE,

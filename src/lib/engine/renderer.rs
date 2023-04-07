@@ -86,6 +86,10 @@ pub struct Renderer {
     depth_image_device_memories: Vec<vk::DeviceMemory>,
     depth_image_views: Vec<vk::ImageView>,
 
+    msaa_sample_count: vk::SampleCountFlags,
+    msaa_color_images: Vec<vk::Image>,
+    msaa_color_image_device_memories: Vec<vk::DeviceMemory>,
+    msaa_color_image_views: Vec<vk::ImageView>,
 }
 
 impl Renderer {
@@ -236,28 +240,38 @@ impl Renderer {
             [pipeline_vertex_shader_stage_ci, pipeline_fragment_shader_stage_ci];
         // ________________________________________________________________________________________________________________
 
+        // CREATE MULTISAMPLE COLOR IMAGE:_________________________________________________________________________________
+        // Note: It is actually make more sense to create frame_in_flight_count amount of depth buffers, but for code simplicity,
+        // I do create swapchain_image_count amount for now:
+        let (msaa_color_images, msaa_color_image_device_memories, msaa_color_image_views) = 
+            Renderer::create_msaa_color_images_and_views(&device, &instance, physical_device, window_inner_size, surface_format, 
+                swapchain_image_count);
+        // ________________________________________________________________________________________________________________
+
         // CREATE ATTACHMENT DESCRIPTIONS AND ATTACHMENT REFERENCES:_______________________________________________________
-        let color_attachment_desc = vk::AttachmentDescription {
+        let msaa_sample_count = vk::SampleCountFlags::TYPE_8; // TODO: Select it dynamically.
+        // Pipeline will use this attachment as color output:
+        let msaa_color_attachment_desc = vk::AttachmentDescription {
             flags: vk::AttachmentDescriptionFlags::empty(),
             format: surface_format,
-            samples: vk::SampleCountFlags::TYPE_1,
+            samples: msaa_sample_count,
             load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
             stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
             initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+            final_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         };
-        let color_attachment_ref = vk::AttachmentReference {
-            attachment: 0, // Specifies which attachment to reference by its index in the attachment descriptions array. 
-            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, // Specifies which layout we would like the attachment to have during a subpass that uses this reference. Vulkan will automatically transition the attachment to this layout when the subpass is started. 
-        };
+        let msaa_color_attachment_ref = vk::AttachmentReference {
+            attachment: 0, 
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        };        
         
         let depth_format = vk::Format::D32_SFLOAT;
         let depth_attachment_desc = vk::AttachmentDescription {
             flags: vk::AttachmentDescriptionFlags::empty(),
             format: depth_format,
-            samples: vk::SampleCountFlags::TYPE_1,
+            samples: msaa_sample_count,
             load_op: vk::AttachmentLoadOp::CLEAR,
             store_op: vk::AttachmentStoreOp::DONT_CARE,
             stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
@@ -269,6 +283,25 @@ impl Renderer {
             attachment: 1,
             layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
         };
+
+        // This will be presented on screen.
+        let resolve_color_attachment_desc = vk::AttachmentDescription {
+            flags: vk::AttachmentDescriptionFlags::empty(),
+            format: surface_format,
+            samples: vk::SampleCountFlags::TYPE_1,
+            load_op: vk::AttachmentLoadOp::CLEAR,
+            store_op: vk::AttachmentStoreOp::STORE,
+            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
+            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
+            initial_layout: vk::ImageLayout::UNDEFINED,
+            final_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+        };
+        let resolve_color_attachment_ref = vk::AttachmentReference {
+            attachment: 2, // Specifies which attachment to reference by its index in the attachment descriptions array. 
+            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, // Specifies which layout we would like the attachment to have during a subpass that uses this reference. Vulkan will automatically transition the attachment to this layout when the subpass is started. 
+        };
+
+        let attachment_descs = [msaa_color_attachment_desc, depth_attachment_desc, resolve_color_attachment_desc];
         // ________________________________________________________________________________________________________________
 
         // CREATE RENDER PASS AND ITS SUBPASSES:___________________________________________________________________________
@@ -290,8 +323,8 @@ impl Renderer {
             input_attachment_count: 0,
             p_input_attachments: ptr::null(),
             color_attachment_count: 1,
-            p_color_attachments: &color_attachment_ref,
-            p_resolve_attachments: ptr::null(),
+            p_color_attachments: &msaa_color_attachment_ref,
+            p_resolve_attachments: &resolve_color_attachment_ref,
             p_depth_stencil_attachment: &depth_attachment_ref,
             preserve_attachment_count: 0,
             p_preserve_attachments: ptr::null(),
@@ -315,7 +348,8 @@ impl Renderer {
         // *Info*: There is also other sync object: "Event". An event is set by some stage and all of previous commands that is affected
         // by the event stage must be happened before other commands that wait for a specific event stage(it can be a different stage
         // from set stage). But all of the other commands between setevent and waitevent can be happened without any dependancy.
-        let subpass_dependency = vk::SubpassDependency{
+        // Color attachment
+        let subpass_dependency1 = vk::SubpassDependency{
             src_subpass: vk::SUBPASS_EXTERNAL, // VK_SUBPASS_EXTERNAL refers to all subpasses in all render passes before (if used in srcSubpass) or after (if used in dstSubpass) this render pass. Without it you would only be able to synchronize subpasses within the current render pass. You wouldn't be able to, for example, wait for a previous render pass to complete before executing this subpass.
             dst_subpass: 0, // If we want to depend on a subpass that's part of a after render pass, we can just pass in VK_SUBPASS_EXTERNAL here. 
             // Finish this pipeline stage in src_subpass before moving to dst_subpass.
@@ -330,7 +364,18 @@ impl Renderer {
             dst_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
             dependency_flags: vk::DependencyFlags::empty(), // 0
         };
-        let attachment_descs = [color_attachment_desc, depth_attachment_desc];
+        // Depth attachment
+        let subpass_dependency2 = vk::SubpassDependency{
+            src_subpass: vk::SUBPASS_EXTERNAL,
+            dst_subpass: 0,
+            src_stage_mask: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS, 
+            dst_stage_mask: vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags::LATE_FRAGMENT_TESTS, 
+            src_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            dst_access_mask: vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE |vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ,
+            dependency_flags: vk::DependencyFlags::empty(),
+        };
+        let subpass_deps = &[subpass_dependency1, subpass_dependency2];
+        
         let render_pass_ci = vk::RenderPassCreateInfo {
             s_type: vk::StructureType::RENDER_PASS_CREATE_INFO,
             p_next: ptr::null(),
@@ -339,8 +384,8 @@ impl Renderer {
             p_attachments: attachment_descs.as_ptr(),
             subpass_count: 1,
             p_subpasses: &subpass_desc,
-            dependency_count: 1,
-            p_dependencies: &subpass_dependency,
+            dependency_count: subpass_deps.len() as u32,
+            p_dependencies: subpass_deps.as_ptr(),
         };
 
         let render_pass = unsafe{device.create_render_pass(&render_pass_ci, None)}.unwrap();
@@ -451,23 +496,12 @@ impl Renderer {
             );
         }
         // ________________________________________________________________________________________________________________
-
         // DEPTH IMAGES:___________________________________________________________________________________________________        
         // Note: It is actually make more sense to create frame_in_flight_count amount of depth buffers, but for code simplicity,
         // I do create swapchain_image_count amount for now:
-        let mut depth_images: Vec<vk::Image> = Vec::with_capacity(swapchain_image_count);
-        let mut depth_image_device_memories: Vec<vk::DeviceMemory> = Vec::with_capacity(swapchain_image_count);
-        let mut depth_image_views: Vec<vk::ImageView> = Vec::with_capacity(swapchain_image_count);
-        for _ in 0..swapchain_image_count {
-            // We do not access this image directly from CPU, so it does not need to be LINEAR tiling.
-            // If a direct mapping from CPU is needed, you could have used LINEAR tiling so, RAM and VRAM does not differ in layout. 
-            let (depth_image, depth_image_device_memory, depth_image_view) = 
-                Renderer::create_depth_image_and_view(&device, &instance, physical_device, window_inner_size, depth_format);
-
-            depth_images.push(depth_image);
-            depth_image_device_memories.push(depth_image_device_memory);
-            depth_image_views.push(depth_image_view);
-        }
+        let (depth_images, depth_image_device_memories, depth_image_views) = 
+            Renderer::create_depth_images_and_views(&device, &instance, physical_device, window_inner_size, depth_format, msaa_sample_count,
+            swapchain_image_count);
         // ________________________________________________________________________________________________________________
 
         
@@ -476,7 +510,8 @@ impl Renderer {
         // specific memory attachments that a render pass instance uses.
         let mut framebuffers : Vec<vk::Framebuffer> = Vec::with_capacity(swapchain_image_views.len());
         for (idx, image_view) in swapchain_image_views.iter().enumerate() {
-            framebuffers.push(Renderer::create_framebuffer(&device, &[*image_view, depth_image_views[idx]], render_pass, window_inner_size));
+            framebuffers.push(Renderer::create_framebuffer(&device, &[msaa_color_image_views[idx], depth_image_views[idx], *image_view],
+                render_pass, window_inner_size));
         }
         // ________________________________________________________________________________________________________________
 
@@ -499,7 +534,7 @@ impl Renderer {
         // axis is 128?
         let texture_mipmap_levels = ((u32::max(image_buffer.width(), image_buffer.height()) as f32).log2().floor() + 1.0) as u32;
         let (texture, texture_device_memory) = Renderer::create_image(
-            &device, &instance, physical_device, image_buffer.width(), image_buffer.height(), texture_mipmap_levels,
+            &device, &instance, physical_device, image_buffer.width(), image_buffer.height(), texture_mipmap_levels, vk::SampleCountFlags::TYPE_1,
             vk::Format::R8G8B8A8_SRGB, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST |
             vk::ImageUsageFlags::SAMPLED, vk::MemoryPropertyFlags::DEVICE_LOCAL);       
 
@@ -796,7 +831,7 @@ impl Renderer {
             s_type: vk::StructureType::PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::PipelineMultisampleStateCreateFlags::empty(),
-            rasterization_samples: vk::SampleCountFlags::TYPE_1,
+            rasterization_samples: msaa_sample_count,
             sample_shading_enable: vk::FALSE,
             min_sample_shading: 1.0f32,
             p_sample_mask: ptr::null(),
@@ -986,6 +1021,10 @@ impl Renderer {
             depth_image_device_memories,
             depth_image_views,
 
+            msaa_sample_count,
+            msaa_color_images,
+            msaa_color_image_views,
+            msaa_color_image_device_memories,
         }
     }
     pub fn render_frame (&mut self, window_inner_size: winit::dpi::PhysicalSize<u32>) {
@@ -1012,7 +1051,8 @@ impl Renderer {
             flags: vk::CommandBufferUsageFlags::empty(),
             p_inheritance_info: ptr::null(), // Used if this is a secondary command buffer, otherwise this value is ignored.
         };
-        let color_clear_value = vk::ClearValue {
+        
+        let msaa_color_image_clear_value = vk::ClearValue {
             color: vk::ClearColorValue{float32: [0.0f32, 0.0f32, 0.0f32, 1.0f32]}
         };
         let depth_clear_value = vk::ClearValue {
@@ -1021,7 +1061,10 @@ impl Renderer {
                 stencil: 0,
             }
         };
-        let clear_values = [color_clear_value, depth_clear_value]; // Index order must match the order of attachments.
+        let resolve_color_clear_value = vk::ClearValue {
+            color: vk::ClearColorValue{float32: [0.0f32, 0.0f32, 0.0f32, 1.0f32]}
+        };
+        let clear_values = [msaa_color_image_clear_value, depth_clear_value, resolve_color_clear_value]; // Index order must match the order of attachments.
         let render_pass_begin_info = vk::RenderPassBeginInfo {
             s_type: vk::StructureType::RENDER_PASS_BEGIN_INFO,
             p_next: ptr::null(),
@@ -1151,6 +1194,7 @@ impl Renderer {
         unsafe{self.device.device_wait_idle()}.unwrap();
         self.recreate_swapchain(window_new_inner_size);
         self.recreate_depth_images(window_new_inner_size);
+        self.recreate_msaa_color_images(window_new_inner_size);
         self.recreate_framebuffers(window_new_inner_size);
 
         println!("Swapchain, depth images and framebuffers are recreated with window inner size: {:?}", window_new_inner_size);
@@ -1169,25 +1213,68 @@ impl Renderer {
             unsafe{self.device.free_memory(*device_memory, None)};
         }
         self.depth_image_device_memories.clear();
-        let swapchain_image_count = self.swapchain_images.len();
-        for _ in 0.. swapchain_image_count{
-            let (depth_image, depth_image_device_memory, depth_image_view) = 
-                Renderer::create_depth_image_and_view(&self.device, &self.instance, self.physical_device,
-                window_new_inner_size, vk::Format::D32_SFLOAT);
-            self.depth_images.push(depth_image);
-            self.depth_image_device_memories.push(depth_image_device_memory);
-            self.depth_image_views.push(depth_image_view);
-        }        
+
+        (self.depth_images, self.depth_image_device_memories, self.depth_image_views) = 
+            Renderer::create_depth_images_and_views(&self.device, &self.instance, self.physical_device,
+            window_new_inner_size, vk::Format::D32_SFLOAT, self.msaa_sample_count, self.swapchain_images.len());
     }
 
-    fn create_depth_image_and_view (device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
-    window_inner_size: dpi::PhysicalSize<u32>, depth_format: vk::Format) -> (vk::Image, vk::DeviceMemory, vk::ImageView) {
-        let (depth_image, depth_image_device_memory) = Renderer::create_image(
-            &device, &instance, physical_device, window_inner_size.width, window_inner_size.height, 1,
-            depth_format, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL);
-        let depth_image_view = Renderer::create_image_view(&device, depth_image, depth_format, 1, vk::ImageAspectFlags::DEPTH);
+    fn recreate_msaa_color_images(&mut self, window_new_inner_size: dpi::PhysicalSize<u32>) {
+        for image_view in &self.msaa_color_image_views {
+            unsafe{self.device.destroy_image_view(*image_view, None)};
+        }
+        self.msaa_color_image_views.clear();
+        for image in &self.msaa_color_images {
+            unsafe{self.device.destroy_image(*image, None)};
+        }
+        self.msaa_color_images.clear();
+        for device_memory in &self.msaa_color_image_device_memories {
+            unsafe{self.device.free_memory(*device_memory, None)};
+        }
+        self.msaa_color_image_device_memories.clear();
 
-        (depth_image, depth_image_device_memory, depth_image_view)
+        (self.msaa_color_images, self.msaa_color_image_device_memories, self.msaa_color_image_views) = 
+            Renderer::create_msaa_color_images_and_views(&self.device, &self.instance, self.physical_device, window_new_inner_size, 
+            self.surface_format, self.swapchain_images.len());
+    }
+
+    fn create_depth_images_and_views (device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
+    window_inner_size: dpi::PhysicalSize<u32>, depth_format: vk::Format, msaa_sample_count: vk::SampleCountFlags, count: usize) 
+    -> (Vec<vk::Image>, Vec<vk::DeviceMemory>, Vec<vk::ImageView>) {
+        let mut depth_images = Vec::with_capacity(count);
+        let mut depth_image_device_memories = Vec::with_capacity(count);
+        let mut depth_image_views = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (depth_image, depth_image_device_memory) = Renderer::create_image(
+                &device, &instance, physical_device, window_inner_size.width, window_inner_size.height, 1, msaa_sample_count,
+                depth_format, vk::ImageTiling::OPTIMAL, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL);
+            let depth_image_view = Renderer::create_image_view(&device, depth_image, depth_format, 1, vk::ImageAspectFlags::DEPTH);
+
+            depth_images.push(depth_image);
+            depth_image_device_memories.push(depth_image_device_memory);
+            depth_image_views.push(depth_image_view);
+        }
+
+        (depth_images, depth_image_device_memories, depth_image_views)
+    }
+
+    fn create_msaa_color_images_and_views(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
+    window_inner_size: dpi::PhysicalSize<u32>, format: vk::Format, count: usize) 
+    -> (Vec<vk::Image>, Vec<vk::DeviceMemory>, Vec<vk::ImageView>) {
+        let mut msaa_color_images = Vec::with_capacity(count);
+        let mut msaa_color_image_device_memories = Vec::with_capacity(count);
+        let mut msaa_color_image_views = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (msaa_color_image,msaa_color_image_device_memory) = Renderer::create_image(&device, &instance, physical_device, 
+                window_inner_size.width, window_inner_size.height, 1, vk::SampleCountFlags::TYPE_8, format, vk::ImageTiling::OPTIMAL, 
+                vk::ImageUsageFlags::TRANSIENT_ATTACHMENT | vk::ImageUsageFlags::COLOR_ATTACHMENT, vk::MemoryPropertyFlags::DEVICE_LOCAL);
+            let msaa_color_image_view = Renderer::create_image_view(&device, msaa_color_image, format, 1, vk::ImageAspectFlags::COLOR);
+            
+            msaa_color_images.push(msaa_color_image);
+            msaa_color_image_device_memories.push(msaa_color_image_device_memory);
+            msaa_color_image_views.push(msaa_color_image_view);
+        }
+        (msaa_color_images, msaa_color_image_device_memories, msaa_color_image_views)
     }
 }
 
@@ -1219,12 +1306,18 @@ impl Drop for Renderer {
             self.device.destroy_buffer(*buffer, None);
         }
         self.device.destroy_image(self.texture, None);
+        for msaa_color_image in &self.msaa_color_images {
+            self.device.destroy_image(*msaa_color_image, None);
+        }
         for depth_image in &self.depth_images {
             self.device.destroy_image(*depth_image, None);
         }
         self.device.free_memory(self.vertex_buffer_device_memory, None);
         self.device.free_memory(self.index_buffer_device_memory, None);
         self.device.free_memory(self.texture_device_memory, None);
+        for msaa_device_memory in &self.msaa_color_image_device_memories {
+            self.device.free_memory(*msaa_device_memory, None);
+        }
         for depth_image_device_memory in &self.depth_image_device_memories {
             self.device.free_memory(*depth_image_device_memory, None);
         }
@@ -1242,6 +1335,9 @@ impl Drop for Renderer {
         }
         self.device.destroy_sampler(self.texture_sampler, None);
         self.device.destroy_image_view(self.texture_view, None);
+        for msaa_color_image_view in &self.msaa_color_image_views {
+            self.device.destroy_image_view(*msaa_color_image_view, None);
+        }
         for depth_image_view in &self.depth_image_views {
             self.device.destroy_image_view(*depth_image_view, None);
         }

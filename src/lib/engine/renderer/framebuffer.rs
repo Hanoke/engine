@@ -29,7 +29,7 @@ impl super::Renderer {
         self.framebuffers.clear(); // Capacity of the Vec stays same after clearing.
         for (idx, swapchain_image_view) in self.swapchain_image_views.iter().enumerate() {
             self.framebuffers.push(super::Renderer::create_framebuffer(
-                &self.device, &[*swapchain_image_view, self.depth_image_views[idx]], self.render_pass, window_new_inner_size));
+                &self.device, &[self.msaa_color_image_views[idx], self.depth_image_views[idx], *swapchain_image_view], self.render_pass, window_new_inner_size));
         }
     }
 }
