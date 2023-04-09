@@ -1,11 +1,16 @@
-use ash::{self, vk};
+use ash::vk;
 use std::ptr;
 
-impl super::Renderer {
+pub struct Image {
+    pub raw: vk::Image,
+    pub device_memory: vk::DeviceMemory,
+}
+
+impl Image {
     /// Also binds image to device memory.
-    pub fn create_image(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice,
-    width: u32, height: u32, mip_levels: u32, samples: vk::SampleCountFlags, format: vk::Format, tiling: 
-    vk::ImageTiling, usage: vk::ImageUsageFlags, mem_prop_flag: vk::MemoryPropertyFlags) -> (vk::Image, vk::DeviceMemory) {
+    pub fn new(device: &ash::Device, instance: &ash::Instance, physical_device: vk::PhysicalDevice, width: u32, height: u32, 
+    mip_levels: u32, sample_count: vk::SampleCountFlags, format: vk::Format, tiling: vk::ImageTiling, usage: vk::ImageUsageFlags, 
+    mem_props: vk::MemoryPropertyFlags) -> Image {
         let image_ci = vk::ImageCreateInfo {
             s_type: vk::StructureType::IMAGE_CREATE_INFO,
             p_next: ptr::null(),
@@ -19,7 +24,7 @@ impl super::Renderer {
             },
             mip_levels,
             array_layers: 1,
-            samples,
+            samples: sample_count,
             tiling, 
             usage,
             sharing_mode: vk::SharingMode::EXCLUSIVE,
@@ -31,7 +36,7 @@ impl super::Renderer {
         
         let physical_device_memory_properties = 
             unsafe{instance.get_physical_device_memory_properties(physical_device)};
-        let required_memory_flags = mem_prop_flag;
+        let required_memory_flags = mem_props;
         let mut memory_type_idx = 0;
         let image_memory_requirements = unsafe{device.get_image_memory_requirements(image)};
         // println!("Image supported memory type bits: {:b}", image_memory_requirements.memory_type_bits);
@@ -55,16 +60,18 @@ impl super::Renderer {
     
         unsafe{device.bind_image_memory(image, image_device_memory, 0)}.unwrap();
 
-        (image, image_device_memory)
+        Image {
+            raw: image,
+            device_memory: image_device_memory
+        }
     }
-
-    pub fn create_image_view(device: &ash::Device, image: vk::Image, surface_format: vk::Format, mip_levels: u32,
-    aspect_mask: vk::ImageAspectFlags) -> vk::ImageView {
+    pub fn create_image_view(&self, device: &ash::Device, surface_format: vk::Format, mip_levels: u32, aspect_mask: vk::ImageAspectFlags)
+    -> vk::ImageView {
         let image_view_ci = vk::ImageViewCreateInfo {
             s_type: vk::StructureType::IMAGE_VIEW_CREATE_INFO,
             p_next: ptr::null(),
             flags: vk::ImageViewCreateFlags::empty(),
-            image,
+            image: self.raw,
             view_type: vk::ImageViewType::TYPE_2D,
             format: surface_format,
             components: vk::ComponentMapping {
@@ -82,32 +89,16 @@ impl super::Renderer {
             }
         };
         
-        unsafe{device.create_image_view(&image_view_ci, None)}.unwrap()
+        unsafe {
+            device.create_image_view(&image_view_ci, None).unwrap()
+        }
     }
 
-    pub fn transition_image_layout (device: &ash::Device, cmd_buffer: vk::CommandBuffer, transition_image: vk::Image,
-    image_subresource_range: vk::ImageSubresourceRange, old_layout: vk::ImageLayout, new_layout: vk::ImageLayout,
-    src_access_mask: vk::AccessFlags, dst_access_mask: vk::AccessFlags, src_stage_mask: vk::PipelineStageFlags,
-    dst_stage_mask: vk::PipelineStageFlags) {
-        let image_memory_barrier = vk::ImageMemoryBarrier{
-            s_type: vk::StructureType::IMAGE_MEMORY_BARRIER,
-            p_next: ptr::null(),
-            src_access_mask,
-            dst_access_mask,
-            old_layout,
-            new_layout,
-            src_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-            dst_queue_family_index: vk::QUEUE_FAMILY_IGNORED,
-            image: transition_image,
-            subresource_range: image_subresource_range,
-        };
-        unsafe{device.cmd_pipeline_barrier(cmd_buffer,
-            src_stage_mask,
-            dst_stage_mask,
-            vk::DependencyFlags::empty(),
-            &[],
-            &[],
-            &[image_memory_barrier]
-        )};
+    /// Destroys raw image and frees device memory.
+    pub fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_image(self.raw, None);
+            device.free_memory(self.device_memory, None);
+        }
     }
 }

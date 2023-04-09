@@ -1,8 +1,13 @@
-use super::renderer;
 use ash::vk;
 
+#[repr(C)]
+pub struct Vertex {
+    pub pos: glam::Vec3,
+    pub uv:  glam::Vec2,
+}
+
 pub struct Model {
-    pub vertices:       Vec<renderer::Vertex>,
+    pub vertices:       Vec<Vertex>,
     pub vertex_indices: Vec<u32>,
     pub rotation:       f32, 
     pub rotation_speed: f32,
@@ -47,9 +52,9 @@ impl Model {
         println!("There are {} triangles.", triangle_count);
         println!("There are {} vertex_indices.", vertex_indices.len());
 
-        let mut vertices: Vec<renderer::Vertex> = Vec::with_capacity(unique_index_tuples.len());
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(unique_index_tuples.len());
         for unique_index_tuple in unique_index_tuples {
-            vertices.push(renderer::Vertex { 
+            vertices.push(Vertex { 
                 pos: vertex_positions[unique_index_tuple.0],
                 uv: vertex_uvs[unique_index_tuple.1]
                 })
@@ -66,7 +71,7 @@ impl Model {
     }
     #[inline(always)]
     pub fn get_vertex_input_binding_stride () -> u32 {
-        std::mem::size_of::<renderer::Vertex>() as u32
+        std::mem::size_of::<Vertex>() as u32
     }
     #[inline(always)]
     pub fn get_vertex_buffer_size(&self) -> vk::DeviceSize {

@@ -1,5 +1,4 @@
 # Hanokei Engine
-Based on vulkan-tutorial.com.
 
 Model Controls:\
 &ensp;&ensp;&ensp;&ensp;-Rotate with Mouse Left Click\

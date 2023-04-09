@@ -17,7 +17,7 @@ impl Engine {
     pub fn new() -> Engine {
         let event_loop = winit::event_loop::EventLoop::new();
         let window = winit::window::WindowBuilder::new().with_title("Hanokei Engine").build(&event_loop).expect("Could not create a window.");
-        let renderer = renderer::Renderer::new(&window, 3);
+        let renderer = renderer::Renderer::new(&window, 4, 3);
 
         Engine {
             event_loop,
@@ -86,7 +86,7 @@ impl Engine {
                             is_first_resized_event = false;
                         } else {
                             // println!("Event::WindowEvent::Resized: {new_inner_size:?}");
-                            self.renderer.window_resized(new_inner_size);
+                            self.renderer.on_window_resized(new_inner_size.width, new_inner_size.height);
                         }
                     },
                     _ => {}
